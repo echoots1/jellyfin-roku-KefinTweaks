@@ -16,7 +16,11 @@ function kefinHandleSelectedItem(selectedItem as dynamic) as boolean
     title = kefinStr(route.LookupCI("title"))
 
     ' One press can reach the main loop twice through Home's aliased selectedItem field
-    if kefinIsRepeatOpen(kind + "|" + title + "|" + kefinStr(route.LookupCI("tmdbId")) + "|" + kefinStr(route.LookupCI("id"))) then return true
+    if kefinIsRepeatOpen(kind + "|" + title + "|" + kefinStr(route.LookupCI("tmdbId")) + "|" + kefinStr(route.LookupCI("id")))
+        ' Callers may have started the spinner (which also blocks the remote)
+        stopLoadingSpinner()
+        return true
+    end if
     kefinLog("Opening " + kind + " '" + title + "'")
 
     if kind = "grid"
@@ -119,14 +123,15 @@ sub kefinOpenJellyfinId(itemId as string, title as string)
         return
     end if
 
-    ' Reuse the app's own selection handling
+    ' Reuse the app's own selection handling. Inside these functions m is this assocarray.
     onSelectedItemEvent({
         node: node,
+        scene: m.global.sceneManager.callFunc("getActiveScene"),
         getData: function() as object
             return m.node
         end function,
         getRoSGNode: function() as dynamic
-            return invalid
+            return m.scene
         end function
     })
 end sub
