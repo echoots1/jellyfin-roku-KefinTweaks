@@ -1,0 +1,31 @@
+' @fileoverview KefinTweaks entries for the Home options (*) menu. Imported into components/home/Home.bs.
+' The selected entry is handled on the main thread by kefinProcessLibraryItemPopup (source/kefin/KefinRouter.bs).
+
+import "pkg:/source/enums/ItemType.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+
+function kefinHomeOptionEntries(focusedItem as dynamic, userData as dynamic) as object
+    entries = []
+    if not isValid(focusedItem) then return entries
+    state = kefinState()
+    if not isValid(state) then return entries
+
+    focusedType = focusedItem.LookupCI("type")
+
+    if kefinIsOn("watchlist", state) and inArray([ItemType.MOVIE, ItemType.SERIES, ItemType.SEASON, ItemType.EPISODE, ItemType.VIDEO, ItemType.MUSICVIDEO], focusedType)
+        if kefinBool(chainLookup(userData, "Likes"), false)
+            entries.push(tr("Remove From Watchlist"))
+        else
+            entries.push(tr("Add To Watchlist"))
+        end if
+    end if
+
+    if kefinIsOn("removeContinue", state)
+        position = chainLookup(userData, "PlaybackPositionTicks")
+        if kefinIsNumberType(LCase(type(position)))
+            if position > 0 then entries.push(tr("Remove From Continue Watching"))
+        end if
+    end if
+
+    return entries
+end function

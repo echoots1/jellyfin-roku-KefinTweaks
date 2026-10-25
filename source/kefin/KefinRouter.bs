@@ -1,0 +1,199 @@
+' @fileoverview KefinTweaks support: main-thread handlers called from MainEventHandlers.bs and ShowScenes.bs.
+' Each hook returns false when KefinTweaks has nothing to do, so the app continues as stock.
+
+import "pkg:/source/kefin/KefinCards.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/kefin/KefinHttp.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Opens KefinTweaks cards (genre/studio/tag grids, Seerr titles, menu screens).
+' Plain Jellyfin items in KefinTweaks rows have no route and are opened by the app as usual.
+function kefinHandleSelectedItem(selectedItem as dynamic) as boolean
+    route = kefinRouteOf(selectedItem)
+    if not isValid(route) then return false
+
+    kind = kefinStr(route.LookupCI("kind"))
+    title = kefinStr(route.LookupCI("title"))
+
+    ' One press can reach the main loop twice through Home's aliased selectedItem field
+    if kefinIsRepeatOpen(kind + "|" + title + "|" + kefinStr(route.LookupCI("tmdbId")) + "|" + kefinStr(route.LookupCI("id"))) then return true
+    kefinLog("Opening " + kind + " '" + title + "'")
+
+    if kind = "grid"
+        kefinOpenGrid(title, { mode: "items", params: kefinAA(route.LookupCI("params")) })
+    else if kind = "watchlist"
+        kefinOpenGrid(title, {
+            mode: "items",
+            params: { Filters: "Likes", Recursive: true, SortBy: "DateCreated", SortOrder: "Descending" }
+        })
+    else if kind = "seerrRequests"
+        kefinOpenGrid(title, { mode: "seerrRequests" })
+    else if kind = "calendar"
+        kefinOpenGrid(title, { mode: "calendar" })
+    else if kind = "seerrDiscover"
+        kefinOpenRows(title, { mode: "seerrDiscover" })
+    else if kind = "seerrDetails"
+        kefinOpenSeerrDetails(route)
+    else if kind = "jellyfinId"
+        kefinOpenJellyfinId(kefinStr(route.LookupCI("id")), title)
+    else
+        kefinLog("Unknown card route '" + kind + "'")
+        stopLoadingSpinner()
+    end if
+
+    return true
+end function
+
+' True when the same card was opened less than a second ago
+function kefinIsRepeatOpen(key as string) as boolean
+    if not isValid(m.kefinOpenClock) then m.kefinOpenClock = CreateObject("roTimespan")
+    now = m.kefinOpenClock.TotalMilliseconds()
+    repeated = isStringEqual(m.kefinLastOpenKey, key) and now - m.kefinLastOpenAt < 1000
+    m.kefinLastOpenKey = key
+    m.kefinLastOpenAt = now
+    return repeated
+end function
+
+' Quick play (the remote's Play key) has nothing to play for KefinTweaks-only cards
+function kefinBlockQuickPlay(itemNode as dynamic) as boolean
+    return isValid(kefinRouteOf(itemNode))
+end function
+
+function kefinRouteOf(node as dynamic) as dynamic
+    if not isValid(node) or type(node) <> "roSGNode" then return invalid
+    if not node.isSubtype("KefinCardData") then return invalid
+    route = node.kefinRoute
+    if not isValidAndNotEmpty(route) then return invalid
+    return route
+end function
+
+sub kefinOpenGrid(title as string, request as object)
+    group = CreateObject("roSGNode", "KefinGridScreen")
+    group.screenTitle = title
+    group.request = request
+    group.observeFieldScoped("selectedItem", m.port)
+    m.global.sceneManager.callFunc("pushScene", group)
+end sub
+
+sub kefinOpenRows(title as string, request as object)
+    group = CreateObject("roSGNode", "KefinRowsScreen")
+    group.screenTitle = title
+    group.request = request
+    group.observeFieldScoped("selectedItem", m.port)
+    m.global.sceneManager.callFunc("pushScene", group)
+end sub
+
+sub kefinOpenSeerrDetails(route as object)
+    group = CreateObject("roSGNode", "KefinSeerrDetails")
+    group.route = route
+    group.observeFieldScoped("selectedItem", m.port)
+    m.global.sceneManager.callFunc("pushScene", group)
+end sub
+
+' Opens any Jellyfin item by id the way the app opens it from a row
+sub kefinOpenJellyfinId(itemId as string, title as string)
+    if itemId = ""
+        stopLoadingSpinner()
+        return
+    end if
+
+    startLoadingSpinner()
+    item = kefinGetJson("/Items/" + itemId, { userId: m.global.session.user.id })
+    if LCase(type(item)) <> "roassociativearray"
+        stopLoadingSpinner()
+        message_dialog(tr("Error loading item"))
+        return
+    end if
+
+    itemType = kefinStr(item.LookupCI("Type"))
+    if itemType = "Studio" or itemType = "Genre"
+        route = kefinFilterRoute(item, invalid)
+        if title <> "" then route.title = title
+        kefinOpenGrid(route.title, { mode: "items", params: route.params })
+        return
+    end if
+
+    node = kefinItemCard(item, 464)
+    if not isValid(node)
+        stopLoadingSpinner()
+        return
+    end if
+
+    ' Reuse the app's own selection handling
+    onSelectedItemEvent({
+        node: node,
+        getData: function() as object
+            return m.node
+        end function,
+        getRoSGNode: function() as dynamic
+            return invalid
+        end function
+    })
+end sub
+
+' ------------------------------------------------------------------------------------------
+' Watchlist (KefinTweaks stores it as the item's "Likes" user data)
+' ------------------------------------------------------------------------------------------
+
+function kefinSetWatchlist(itemId as string, onWatchlist as boolean) as boolean
+    if itemId = "" then return false
+    response = kefinRequest("POST", "/UserItems/" + itemId + "/Rating", { userId: m.global.session.user.id, likes: onWatchlist })
+    if not response.ok then kefinLog("Watchlist update failed for " + itemId + " (" + response.code.toStr() + ")")
+    return response.ok
+end function
+
+' Movie/episode detail screen button (see components/kefin/KefinDetails.bs)
+function kefinHandleButton(buttonId as dynamic, activeScene as dynamic) as boolean
+    if not isStringEqual(buttonId, "kefin-watchlist-button") then return false
+    if not isValid(activeScene) then return true
+
+    button = activeScene.findNode("kefin-watchlist-button")
+    ' itemContent.id can hold the selected version's media source id, so prefer the item's own id
+    itemId = kefinStr(chainLookup(activeScene, "itemContent.json.Id"))
+    if itemId = "" then itemId = kefinStr(chainLookup(activeScene, "itemContent.id"))
+    if not isValid(button) or itemId = "" then return true
+
+    onWatchlist = not kefinBool(button.kefinOnWatchlist, false)
+    if kefinSetWatchlist(itemId, onWatchlist)
+        kefinApplyWatchlistButton(button, onWatchlist)
+    end if
+    return true
+end function
+
+' ------------------------------------------------------------------------------------------
+' Home options menu entries (added by components/kefin/KefinHomeOptions.bs)
+' ------------------------------------------------------------------------------------------
+
+function kefinProcessLibraryItemPopup(selectedPopupButton as string, itemID as string) as boolean
+    handled = false
+
+    if isStringEqual(selectedPopupButton, tr("Add To Watchlist"))
+        kefinSetWatchlist(itemID, true)
+        handled = true
+    else if isStringEqual(selectedPopupButton, tr("Remove From Watchlist"))
+        kefinSetWatchlist(itemID, false)
+        handled = true
+    else if isStringEqual(selectedPopupButton, tr("Remove From Continue Watching"))
+        kefinRemoveFromContinueWatching(itemID)
+        handled = true
+    end if
+
+    if handled
+        ' Redraw the home rows so the change shows right away
+        group = m.global.sceneManager.callFunc("getActiveScene")
+        if isValid(group) and group.isSubtype("Home") then group.callFunc("refresh")
+    end if
+    return handled
+end function
+
+' KefinTweaks removeContinue: reset the resume position but keep the played state
+sub kefinRemoveFromContinueWatching(itemId as string)
+    userId = m.global.session.user.id
+    userData = kefinGetJson("/UserItems/" + itemId + "/UserData", { userId: userId })
+    if LCase(type(userData)) <> "roassociativearray" then userData = {}
+
+    userData.PlaybackPositionTicks = 0
+    userData.PlayedPercentage = 0
+    response = kefinRequest("POST", "/UserItems/" + itemId + "/UserData", { userId: userId }, userData)
+    if not response.ok then kefinLog("Remove from Continue Watching failed (" + response.code.toStr() + ")")
+end sub

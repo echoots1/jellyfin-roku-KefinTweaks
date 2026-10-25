@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Builds HomeRow nodes for KefinTweaks home sections (see KefinSectionsTask.bs) -->
+<component name="KefinSectionsTask" extends="Task">
+  <interface>
+    <field id="sections" type="array" />
+    <field id="discovery" type="assocarray" />
+    <field id="root" type="string" />
+    <field id="watchlistAutoRemove" type="boolean" value="false" />
+    <field id="row" type="node" alwaysNotify="true" />
+    <field id="finished" type="boolean" alwaysNotify="true" />
+  </interface>
+</component>

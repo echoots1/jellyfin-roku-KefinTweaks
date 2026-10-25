@@ -1,0 +1,50 @@
+import "pkg:/source/enums/ColorPalette.bs"
+import "pkg:/source/utils/misc.bs"
+
+sub init()
+    m.top.optionsAvailable = false
+    m.rows = m.top.findNode("rows")
+    m.rows.focusBitmapBlendColor = chainLookupReturn(m.global.session, "user.settings.colorCursor", ColorPalette.HIGHLIGHT)
+    m.rows.observeField("rowItemSelected", "onItemSelected")
+    m.message = m.top.findNode("message")
+
+    m.dataTask = CreateObject("roSGNode", "KefinDataTask")
+    m.dataTask.observeField("done", "onDataLoaded")
+end sub
+
+sub onRequestChanged()
+    m.top.overhangTitle = m.top.screenTitle
+    m.message.visible = false
+    startLoadingSpinner(false)
+    m.dataTask.request = m.top.request
+    m.dataTask.control = "RUN"
+end sub
+
+sub onDataLoaded()
+    stopLoadingSpinner()
+    content = m.dataTask.content
+    if not isValid(content) or content.getChildCount() = 0
+        m.message.text = tr("Nothing to show here right now. Check that Seerr is reachable from Jellyfin Enhanced.")
+        m.message.visible = true
+        return
+    end if
+
+    m.rows.content = content
+    m.rows.setFocus(true)
+    m.top.lastFocus = m.rows
+end sub
+
+sub onItemSelected()
+    selected = m.rows.rowItemSelected
+    if not isValidAndNotEmpty(selected) or not isValid(m.rows.content) then return
+    row = m.rows.content.getChild(selected[0])
+    if not isValid(row) then return
+    item = row.getChild(selected[1])
+    if isValid(item) then m.top.selectedItem = item
+end sub
+
+sub OnScreenShown()
+    m.top.overhangTitle = m.top.screenTitle
+    m.rows.setFocus(true)
+    m.top.lastFocus = m.rows
+end sub

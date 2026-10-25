@@ -1,0 +1,48 @@
+import "pkg:/source/enums/ColorPalette.bs"
+import "pkg:/source/utils/misc.bs"
+
+sub init()
+    m.top.optionsAvailable = false
+    m.grid = m.top.findNode("grid")
+    m.grid.focusBitmapBlendColor = chainLookupReturn(m.global.session, "user.settings.colorCursor", ColorPalette.HIGHLIGHT)
+    m.grid.observeField("itemSelected", "onItemSelected")
+    m.message = m.top.findNode("message")
+
+    m.dataTask = CreateObject("roSGNode", "KefinDataTask")
+    m.dataTask.observeField("done", "onDataLoaded")
+end sub
+
+sub onRequestChanged()
+    m.top.overhangTitle = m.top.screenTitle
+    m.message.visible = false
+    startLoadingSpinner(false)
+    m.dataTask.request = m.top.request
+    m.dataTask.control = "RUN"
+end sub
+
+sub onDataLoaded()
+    stopLoadingSpinner()
+    content = m.dataTask.content
+    if not isValid(content) or content.getChildCount() = 0
+        m.message.text = tr("Nothing to show here right now.")
+        m.message.visible = true
+        m.grid.content = CreateObject("roSGNode", "ContentNode")
+        return
+    end if
+
+    m.grid.content = content
+    m.grid.setFocus(true)
+    m.top.lastFocus = m.grid
+end sub
+
+sub onItemSelected()
+    if not isValid(m.grid.content) then return
+    item = m.grid.content.getChild(m.grid.itemSelected)
+    if isValid(item) then m.top.selectedItem = item
+end sub
+
+sub OnScreenShown()
+    m.top.overhangTitle = m.top.screenTitle
+    m.grid.setFocus(true)
+    m.top.lastFocus = m.grid
+end sub

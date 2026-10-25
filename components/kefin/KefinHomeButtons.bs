@@ -1,0 +1,154 @@
+' @fileoverview KefinTweaks custom menu links as buttons next to Search and Settings on Home.
+' Imported into components/home/Home.bs. Links are rebuilt whenever the config changes.
+
+import "pkg:/source/enums/ColorPalette.bs"
+import "pkg:/source/enums/KeyCode.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+
+sub kefinHomeButtonsInit()
+    m.kefinButtons = []
+    m.kefinButtonLinks = []
+    m.kefinButtonsSignature = ""
+    kefinEnsureGlobals()
+    m.global.observeFieldScoped("kefin", "kefinHomeButtonsRefresh")
+    kefinHomeButtonsRefresh()
+end sub
+
+sub kefinHomeButtonsRefresh()
+    links = kefinVisibleMenuLinks()
+
+    signature = ""
+    for each link in links
+        signature = signature + link.kind + ":" + link.name + "|"
+    end for
+    if signature = m.kefinButtonsSignature then return
+    m.kefinButtonsSignature = signature
+
+    hadFocus = false
+    for each button in m.kefinButtons
+        if button.hasFocus() then hadFocus = true
+        m.buttons.removeChild(button)
+    end for
+    m.kefinButtons = []
+    m.kefinButtonLinks = []
+
+    icons = {
+        seerrDiscover: "pkg:/images/icons/star.png",
+        seerrRequests: "pkg:/images/icons/plus.png",
+        calendar: "pkg:/images/icons/numberList.png",
+        watchlist: "pkg:/images/icons/check.png"
+    }
+
+    for each link in links
+        button = CreateObject("roSGNode", "TextButton")
+        button.iconSide = "left"
+        button.fontSize = 25
+        button.padding = 20
+        button.icon = icons.LookupCI(link.kind)
+        button.focusIcon = button.icon
+        button.text = link.name
+        button.height = 50
+        button.width = 220
+        button.textColor = ColorPalette.WHITE
+        button.background = ColorPalette.DARKGREY
+        button.focusTextColor = ColorPalette.WHITE
+        button.focusBackground = chainLookupReturn(m.global.session, "user.settings.colorCursor", ColorPalette.HIGHLIGHT)
+        m.buttons.appendChild(button)
+        m.kefinButtons.push(button)
+        m.kefinButtonLinks.push(link)
+    end for
+
+    if hadFocus
+        m.settingsButton.focus = true
+        m.settingsButton.setFocus(true)
+        setLastFocus(m.settingsButton)
+    end if
+end sub
+
+' Menu links that have a Roku screen and whose backing service is available
+function kefinVisibleMenuLinks() as object
+    visible = []
+    state = kefinState()
+    if not isValid(state) or not kefinIsOn("customMenuLinks", state) then return visible
+
+    isAdmin = kefinBool(chainLookup(m.global.session, "user.Policy.IsAdministrator"), false)
+    for each link in kefinArr(state.LookupCI("menuLinks"))
+        kind = kefinStr(link.LookupCI("kind"))
+        if kind = "" then continue for
+        if kefinBool(link.LookupCI("adminOnly"), false) and not isAdmin then continue for
+        if (kind = "seerrDiscover" or kind = "seerrRequests") and not kefinSeerrReady(state) then continue for
+        if kind = "calendar" and not kefinBool(chainLookup(state, "seerr.enhanced"), false) then continue for
+        visible.push(link)
+    end for
+    return visible
+end function
+
+' Handles keys while the top buttons have focus. Returns true when handled.
+function kefinHomeButtonsOnKey(key as string) as boolean
+    count = m.kefinButtons.Count()
+    if count = 0 then return false
+
+    focusedIndex = -1
+    for i = 0 to count - 1
+        if m.kefinButtons[i].hasFocus() then focusedIndex = i
+    end for
+
+    if isStringEqual(key, KeyCode.RIGHT)
+        if m.settingsButton.hasFocus()
+            m.settingsButton.focus = false
+            kefinFocusHomeButton(0)
+            return true
+        end if
+        if focusedIndex >= 0 and focusedIndex < count - 1
+            m.kefinButtons[focusedIndex].focus = false
+            kefinFocusHomeButton(focusedIndex + 1)
+            return true
+        end if
+        if focusedIndex = count - 1
+            overhang = m.top.getScene().findNode("overhang")
+            if not isValid(overhang) then return true
+            m.kefinButtons[focusedIndex].focus = false
+            overhang.callFunc("highlightUser")
+            overhang.setfocus(true)
+            setLastFocus(overhang)
+            return true
+        end if
+        return false
+    end if
+
+    if focusedIndex < 0 then return false
+
+    if isStringEqual(key, KeyCode.LEFT)
+        m.kefinButtons[focusedIndex].focus = false
+        if focusedIndex = 0
+            m.settingsButton.focus = true
+            m.settingsButton.setfocus(true)
+            setLastFocus(m.settingsButton)
+        else
+            kefinFocusHomeButton(focusedIndex - 1)
+        end if
+        return true
+    end if
+
+    if isStringEqual(key, KeyCode.OK)
+        link = m.kefinButtonLinks[focusedIndex]
+        card = CreateObject("roSGNode", "KefinCardData")
+        card.kefinRoute = { kind: link.kind, title: link.name }
+        m.top.selectedItem = card
+        m.top.selectedItem = invalid
+        return true
+    end if
+
+    ' Let Home move focus down to the rows; just clear the highlight
+    if isStringEqual(key, KeyCode.DOWN)
+        m.kefinButtons[focusedIndex].focus = false
+    end if
+    return false
+end function
+
+sub kefinFocusHomeButton(index as integer)
+    button = m.kefinButtons[index]
+    button.focus = true
+    button.setFocus(true)
+    setLastFocus(button)
+end sub

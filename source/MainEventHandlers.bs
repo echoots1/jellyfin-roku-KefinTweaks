@@ -24,6 +24,7 @@ sub onQuickPlayEvent(msg)
 
     if not isValid(itemNode) then return
     if not isValidAndNotEmpty(itemNode.id) then return
+    if kefinBlockQuickPlay(itemNode) then return
 
     ' Get item type
     selectedItemType = invalid
@@ -749,6 +750,7 @@ end sub
 sub onSelectedItemEvent(msg)
     ' If you select a library from ANYWHERE, follow this flow
     selectedItem = msg.getData()
+    if kefinHandleSelectedItem(selectedItem) then return
     if isValid(selectedItem)
         startLoadingSpinner()
         selectedItemType = selectedItem.type
@@ -1378,6 +1380,7 @@ end sub
 sub onItemSelectedEvent(msg)
     startLoadingSpinner()
     node = getMsgPicker(msg)
+    if kefinHandleSelectedItem(node) then return
     if isStringEqual(node.type, ItemType.SERIES)
         CreateSeriesDetailsGroup(node.id)
     else if isStringEqual(node.type, ItemType.MOVIE)
@@ -1445,6 +1448,8 @@ sub onButtonSelectedEvent(msg)
         MainAction.closeOKDialog(msg)
         return
     end if
+
+    if kefinHandleButton(btn, activeScene) then return
 
     ' User chose Play button from movie detail view
     if isStringEqual(btn, "play-button")
@@ -1899,6 +1904,8 @@ sub updateAlbumTrackFavoriteState(itemID as string, isFavorite as boolean)
 end sub
 
 sub processLibraryItemPopup(selectedPopupButton as string, itemID as string, params as object)
+    if kefinProcessLibraryItemPopup(selectedPopupButton, itemID) then return
+
     if isStringEqual(selectedPopupButton, tr("Play Track"))
         quickplay.audio({
             id: itemID,

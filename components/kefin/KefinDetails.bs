@@ -1,0 +1,160 @@
+' @fileoverview KefinTweaks additions to the movie/episode and series detail screens.
+' Imported into components/movies/MovieDetails.bs and components/tvshows/TVSeriesDetails.bs.
+
+import "pkg:/source/enums/ColorPalette.bs"
+import "pkg:/source/enums/KeyCode.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+
+const KEFIN_WATCHLIST_BUTTON_ID = "kefin-watchlist-button"
+
+' ------------------------------------------------------------------------------------------
+' Movie / episode screen (MarkupList of ButtonData). The press is handled on the main thread
+' by kefinHandleButton in source/kefin/KefinRouter.bs.
+' ------------------------------------------------------------------------------------------
+
+' Adds, updates or removes the Watchlist button. Returns true when the button list changed size.
+function kefinUpdateMovieWatchlistButton(buttonList as object, itemData as object) as boolean
+    content = buttonList.content
+    if not isValid(content) then return false
+
+    existing = invalid
+    for each child in content.getChildren(-1, 0)
+        if isStringEqual(child.id, KEFIN_WATCHLIST_BUTTON_ID) then existing = child
+    end for
+
+    itemType = LCase(kefinStr(itemData.LookupCI("Type")))
+    wanted = kefinIsOn("watchlist") and inArray(["movie", "episode", "video", "musicvideo"], itemType)
+
+    if not wanted
+        if isValid(existing)
+            content.removeChild(existing)
+            return true
+        end if
+        return false
+    end if
+
+    changed = false
+    if not isValid(existing)
+        existing = CreateObject("roSGNode", "ButtonData")
+        existing.id = KEFIN_WATCHLIST_BUTTON_ID
+        existing.iconSide = "left"
+        existing.fontSize = 35
+        existing.padding = 35
+        existing.height = 75
+        existing.width = 600
+
+        ' Sit next to the Favorite button when there is one
+        insertAt = content.getChildCount()
+        children = content.getChildren(-1, 0)
+        for i = 0 to children.Count() - 1
+            if isStringEqual(children[i].id, "favorite-button") then insertAt = i + 1
+        end for
+        content.insertChild(existing, insertAt)
+        changed = true
+    end if
+
+    kefinApplyWatchlistButton(existing, kefinBool(chainLookup(itemData, "UserData.Likes"), false))
+    return changed
+end function
+
+' versionPreferences: the media source KefinTweaks would list first. Ranked by the first matching
+' edition term, then the first matching version term, then server order (versionPreferences.js rankOptions).
+function kefinPreferredMediaSourceId(mediaSources as dynamic) as dynamic
+    sources = kefinArr(mediaSources)
+    if sources.Count() = 0 then return invalid
+    firstId = sources[0].LookupCI("Id")
+
+    state = kefinState()
+    if not isValid(state) or not kefinIsOn("versionPreferences", state) or sources.Count() < 2 then return firstId
+
+    versions = kefinArr(chainLookup(state, "versionPreferences.versions"))
+    editions = kefinArr(chainLookup(state, "versionPreferences.editions"))
+
+    bestIndex = 0
+    bestEdition = 0
+    bestVersion = 0
+    for i = 0 to sources.Count() - 1
+        label = LCase(kefinStr(sources[i].LookupCI("Name")))
+        editionRank = kefinTermRank(label, editions)
+        versionRank = kefinTermRank(label, versions)
+        if i = 0 or editionRank < bestEdition or (editionRank = bestEdition and versionRank < bestVersion)
+            bestIndex = i
+            bestEdition = editionRank
+            bestVersion = versionRank
+        end if
+    end for
+
+    if bestIndex > 0 then kefinLog("Version preference picked '" + kefinStr(sources[bestIndex].LookupCI("Name")) + "'")
+    return sources[bestIndex].LookupCI("Id")
+end function
+
+' Index of the first term found in label; labels matching nothing rank at the "__none__" entry
+function kefinTermRank(label as string, terms as object) as integer
+    noneIndex = terms.Count()
+    for i = 0 to terms.Count() - 1
+        term = LCase(kefinStr(terms[i]).Trim())
+        if term = "" then continue for
+        if term = "__none__"
+            if noneIndex = terms.Count() then noneIndex = i
+            continue for
+        end if
+        if Instr(1, label, term) > 0 then return i
+    end for
+    return noneIndex
+end function
+
+' ------------------------------------------------------------------------------------------
+' Series screen (ButtonGroupHoriz of IconButtons). The press is handled here with a task.
+' ------------------------------------------------------------------------------------------
+
+sub kefinSeriesWatchlistInit()
+    m.kefinWatchlistButton = invalid
+    m.kefinWatchlistTask = CreateObject("roSGNode", "KefinDataTask")
+    m.kefinWatchlistTask.observeField("done", "kefinOnSeriesWatchlistSaved")
+end sub
+
+sub kefinSeriesWatchlistUpdate(itemData as object)
+    if not kefinIsOn("watchlist")
+        if isValid(m.kefinWatchlistButton)
+            m.buttonGrp.removeChild(m.kefinWatchlistButton)
+            m.kefinWatchlistButton = invalid
+            m.buttonCount = m.buttonGrp.getChildCount()
+        end if
+        return
+    end if
+
+    if not isValid(m.kefinWatchlistButton)
+        button = CreateObject("roSGNode", "IconButton")
+        button.id = KEFIN_WATCHLIST_BUTTON_ID
+        button.background = "#070707"
+        button.focusBackground = chainLookupReturn(m.global.session, "user.settings.colorCursor", ColorPalette.HIGHLIGHT)
+        button.padding = 35
+        button.height = 65
+        button.width = 140
+        m.buttonGrp.appendChild(button)
+        m.kefinWatchlistButton = button
+        m.buttonCount = m.buttonGrp.getChildCount()
+    end if
+
+    m.kefinWatchlistItemId = kefinStr(itemData.LookupCI("Id"))
+    kefinApplyWatchlistButton(m.kefinWatchlistButton, kefinBool(chainLookup(itemData, "UserData.Likes"), false))
+end sub
+
+function kefinSeriesWatchlistOnKey(key as string, press as boolean) as boolean
+    if not press or not isValid(m.kefinWatchlistButton) then return false
+    if not m.kefinWatchlistButton.hasFocus() then return false
+    if not isStringEqual(key, KeyCode.OK) then return false
+    if isStringEqual(m.kefinWatchlistTask.state, "run") then return true
+
+    m.kefinWatchlistPending = not kefinBool(m.kefinWatchlistButton.kefinOnWatchlist, false)
+    m.kefinWatchlistTask.request = { mode: "setWatchlist", itemId: m.kefinWatchlistItemId, likes: m.kefinWatchlistPending }
+    m.kefinWatchlistTask.control = "RUN"
+    return true
+end function
+
+sub kefinOnSeriesWatchlistSaved()
+    if not isValid(m.kefinWatchlistButton) then return
+    if kefinBool(chainLookup(m.kefinWatchlistTask.result, "ok"), false)
+        kefinApplyWatchlistButton(m.kefinWatchlistButton, m.kefinWatchlistPending)
+    end if
+end sub
