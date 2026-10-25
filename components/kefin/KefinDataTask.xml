@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loads data for the KefinTweaks screens and Seerr requests (see KefinDataTask.bs) -->
+<component name="KefinDataTask" extends="Task">
+  <interface>
+    <field id="request" type="assocarray" />
+    <field id="content" type="node" />
+    <field id="result" type="assocarray" />
+    <field id="done" type="boolean" alwaysNotify="true" />
+  </interface>
+</component>

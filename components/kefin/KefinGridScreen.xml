@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Poster grid for KefinTweaks: genre/studio/tag lists, Watchlist, Seerr requests, calendar -->
+<component name="KefinGridScreen" extends="JFScreen">
+  <children>
+    <MarkupGrid
+      id="grid"
+      translation="[170, 165]"
+      itemComponentName="KefinPosterItem"
+      itemSize="[230, 420]"
+      itemSpacing="[40, 30]"
+      numColumns="6"
+      numRows="2"
+      vertFocusAnimationStyle="fixedFocusWrap"
+      drawFocusFeedback="true" />
+    <Label id="message" translation="[96, 480]" width="1728" horizAlign="center" font="font:MediumSystemFont" visible="false" />
+  </children>
+  <interface>
+    <field id="screenTitle" type="string" />
+    <field id="request" type="assocarray" onChange="onRequestChanged" />
+    <field id="selectedItem" type="node" alwaysNotify="true" />
+  </interface>
+</component>

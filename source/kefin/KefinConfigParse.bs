@@ -1,0 +1,244 @@
+' @fileoverview KefinTweaks support: reads the KefinTweaks config out of the JavaScript Injector
+' script and reduces it to what the Roku app uses.
+'
+' KefinTweaks saves its config as a JavaScript Injector entry named "KefinTweaks-Config" whose body is
+' `window.KefinTweaksConfig = { ...JSON... };`. JavaScript Injector serves it, without login, in
+' /JavaScriptInjector/public.js. KefinTweaks parses it the same way (scripts/utils.js parseConfigFromScript).
+
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Native Jellyfin home sections the app already renders itself, keyed by KefinTweaks jellyfinId
+const KEFIN_NATIVE_SECTION_IDS = "smalllibrarytiles,librarybuttons,resume,resumeaudio,resumebook,nextup,latestmedia,livetv,activerecordings"
+
+' Finds and parses the KefinTweaks config in a script. Returns { json, text } or invalid.
+function kefinExtractConfig(script as dynamic) as dynamic
+    if not isValidAndNotEmpty(script) then return invalid
+
+    markers = ["window.KefinTweaksConfig = ", "window.KefinTweaksConfig="]
+    jsonStart = 0
+    for each marker in markers
+        markerIndex = Instr(1, script, marker)
+        if markerIndex > 0
+            jsonStart = markerIndex + Len(marker)
+            exit for
+        end if
+    end for
+    if jsonStart = 0 then return invalid
+
+    ' The object ends at the first "};" that closes valid JSON. JSON itself never contains "};"
+    ' outside a string, so this is normally the first candidate.
+    searchFrom = jsonStart
+    for attempt = 1 to 5
+        endIndex = Instr(searchFrom, script, "};")
+        if endIndex = 0 then return invalid
+
+        candidate = Mid(script, jsonStart, endIndex - jsonStart + 1)
+        parsed = ParseJson(candidate)
+        if LCase(type(parsed)) = "roassociativearray"
+            return { json: parsed, text: candidate }
+        end if
+        searchFrom = endIndex + 2
+    end for
+
+    return invalid
+end function
+
+' Returns an md5 of the config text so we can tell when the admin changed it
+function kefinConfigStamp(text as string) as string
+    bytes = CreateObject("roByteArray")
+    bytes.FromAsciiString(text)
+    digest = CreateObject("roEVPDigest")
+    digest.Setup("md5")
+    return digest.Process(bytes)
+end function
+
+' Reduces the full config to what the Roku app uses. Unknown keys are ignored.
+function kefinReduceConfig(cfg as object) as object
+    scripts = {}
+    for each name in kefinAA(cfg.LookupCI("scripts"))
+        scripts[name] = kefinBool(cfg.scripts[name], false)
+    end for
+
+    root = kefinStr(cfg.LookupCI("kefinTweaksRootResolved"))
+    if root = "" then root = kefinStr(cfg.LookupCI("kefinTweaksRoot"))
+    if root <> "" and Right(root, 1) <> "/" then root = root + "/"
+
+    versionPrefs = kefinAA(cfg.LookupCI("versionPreferences"))
+
+    state = {
+        ok: true,
+        enabled: kefinBool(cfg.LookupCI("enabled"), false),
+        root: root,
+        scripts: scripts,
+        search: { enableJellyseerr: kefinBool(chainLookup(cfg, "search.enableJellyseerr"), false) },
+        flattenSingleSeasonShows: { hideSingleSeasonContainer: kefinBool(chainLookup(cfg, "flattenSingleSeasonShows.hideSingleSeasonContainer"), false) },
+        versionPreferences: {
+            versions: kefinArr(versionPrefs.LookupCI("versions")),
+            editions: kefinArr(versionPrefs.LookupCI("editions"))
+        },
+        menuLinks: kefinReduceMenuLinks(kefinArr(cfg.LookupCI("customMenuLinks"))),
+        home: kefinReduceHomeScreen(kefinAA(cfg.LookupCI("homeScreenConfig")), root)
+    }
+
+    return state
+end function
+
+' Maps KefinTweaks custom menu links to Roku screens.
+' Links run arbitrary web actions, so they are matched by keyword in their name/action/url.
+function kefinReduceMenuLinks(links as object) as object
+    result = []
+    for each link in links
+        if LCase(type(link)) <> "roassociativearray" then continue for
+
+        name = kefinStr(link.LookupCI("name"))
+        shown = kefinBool(link.LookupCI("sideMenu"), false) or kefinBool(link.LookupCI("userMenu"), false) or kefinStr(link.LookupCI("topNavigation")) <> ""
+        if name = "" or not shown then continue for
+
+        haystack = LCase(name + " " + kefinStr(link.LookupCI("action")) + " " + kefinStr(link.LookupCI("url")))
+        kind = ""
+        if Instr(1, haystack, "statistic") > 0 or Instr(1, haystack, "http://") > 0 or Instr(1, haystack, "https://") > 0
+            kind = ""
+        else if Instr(1, haystack, "discover") > 0 or Instr(1, haystack, "recommend") > 0
+            kind = "seerrDiscover"
+        else if Instr(1, haystack, "request") > 0 or Instr(1, haystack, "download") > 0
+            kind = "seerrRequests"
+        else if Instr(1, haystack, "calendar") > 0
+            kind = "calendar"
+        else if Instr(1, haystack, "watchlist") > 0
+            kind = "watchlist"
+        end if
+
+        result.push({
+            name: name,
+            kind: kind,
+            adminOnly: kefinBool(link.LookupCI("isAdminLink"), false)
+        })
+    end for
+    return result
+end function
+
+function kefinReduceHomeScreen(homeConfig as object, root as string) as object
+    home = {
+        present: homeConfig.Count() > 0,
+        nativeOrder: {},
+        sections: [],
+        discovery: { enabled: false, sections: [] },
+        settings: kefinAA(homeConfig.LookupCI("HOME_SETTINGS")),
+        root: root
+    }
+    if not home.present then return home
+
+    nativeIds = KEFIN_NATIVE_SECTION_IDS.Split(",")
+
+    for each groupKey in ["HOME_SECTION_GROUPS", "SEASONAL_SECTION_GROUPS", "CUSTOM_SECTION_GROUPS"]
+        for each group in kefinArr(homeConfig.LookupCI(groupKey))
+            for each section in kefinArr(kefinAA(group).LookupCI("sections"))
+                if LCase(type(section)) <> "roassociativearray" then continue for
+                if not kefinBool(section.LookupCI("enabled"), false) then continue for
+
+                ' Sections paired with a native Jellyfin section are drawn by the app itself.
+                ' Remember their order so KefinTweaks rows land in the right place around them.
+                jellyfinId = LCase(kefinStr(section.LookupCI("jellyfinId")))
+                if jellyfinId <> ""
+                    order = kefinInt(section.LookupCI("order"), 0)
+                    for each nativeId in [jellyfinId, LCase(kefinStr(section.LookupCI("jellyfinId2")))]
+                        if nativeId = "" then continue for
+                        existing = home.nativeOrder.LookupCI(nativeId)
+                        if not isValid(existing) or order < existing then home.nativeOrder[nativeId] = order
+                    end for
+                    if not inArray(nativeIds, jellyfinId)
+                        kefinLog("Home section '" + kefinStr(section.LookupCI("name")) + "' maps to unknown native section " + jellyfinId + " - ignored")
+                    end if
+                    continue for
+                end if
+
+                home.sections.push(kefinReduceSection(section))
+            end for
+        end for
+    end for
+
+    discoverySettings = kefinAA(homeConfig.LookupCI("DISCOVERY_SETTINGS"))
+    home.discovery.enabled = kefinBool(discoverySettings.LookupCI("enabled"), false)
+    home.discovery.settings = discoverySettings
+    if home.discovery.enabled
+        for each group in kefinArr(homeConfig.LookupCI("DISCOVERY_SECTION_GROUPS"))
+            for each section in kefinArr(kefinAA(group).LookupCI("sections"))
+                if LCase(type(section)) <> "roassociativearray" then continue for
+                if not kefinBool(section.LookupCI("enabled"), false) then continue for
+                home.discovery.sections.push(kefinReduceSection(section))
+            end for
+        end for
+    end if
+
+    return home
+end function
+
+' Copies a section, dropping web-only presentation settings
+function kefinReduceSection(section as object) as object
+    reduced = {}
+    for each key in section
+        if not inArray(["spotlightConfig", "sectionCssClass", "cardTitlePosition", "cardTitleCapitalization", "cardTitleFontFamily", "cardTitleFontSize", "borderStyle", "viewMoreUrl", "description"], key)
+            reduced[key] = section[key]
+        end if
+    end for
+    return reduced
+end function
+
+' Logs how each KefinTweaks setting is handled on Roku. Called when the config changes.
+sub kefinLogSettings(cfg as object, state as object)
+    support = {
+        watchlist: "on: home row, Watchlist buttons/options, watched items auto-removed",
+        homeScreen: "on: KefinTweaks home sections rendered as rows",
+        search: "on: Seerr results row in Search (with search.enableJellyseerr)",
+        customMenuLinks: "on: links shown as Home buttons when they map to a Roku screen",
+        flattenSingleSeasonShows: "on: single-season shows open on their episode list",
+        versionPreferences: "on: preferred version picked on detail screens",
+        removeContinue: "on: Options > Remove From Continue Watching",
+        subtitleSearch: "native: the app already has subtitle search",
+        thumbnailScrubber: "native: the app already shows trickplay thumbnails while seeking",
+        collections: "native: collection screens already have sort options",
+        infiniteScroll: "native: library grids already load as you scroll",
+        playlist: "native: the app's playlist screen already has play and item details",
+        seriesInfo: "partial: series screens already show episode count, runtime and year",
+        itemDetailsCollections: "not built: KefinTweaks itself only loads this on Jellyfin 10/11",
+        watchTogether: "not built yet on Roku",
+        exclusiveElsewhere: "not possible: web-only branding",
+        skinManager: "not possible: CSS skins",
+        headerTabs: "not applicable: web navigation",
+        breadcrumbs: "not applicable: web navigation",
+        hamburgerMenu: "not applicable: web navigation",
+        backdropLeakFix: "not applicable: jellyfin-web bug fix",
+        dashboardButtonFix: "not applicable: jellyfin-web bug fix",
+        games: "not possible: web pages",
+        userManager: "not applicable: admin web tool"
+    }
+
+    kefinLog("Config loaded (enabled=" + (kefinBool(cfg.LookupCI("enabled"), false) ? "true" : "false") + ")")
+    scripts = kefinAA(cfg.LookupCI("scripts"))
+    for each name in scripts
+        status = support.LookupCI(name)
+        if not isValid(status) then status = "unknown setting - ignored"
+        kefinLog("  " + name + " = " + (kefinBool(scripts[name], false) ? "true" : "false") + " -> " + status)
+    end for
+
+    known = ["kefinTweaksRoot", "kefinTweaksRootResolved", "enabled", "scripts", "search", "flattenSingleSeasonShows", "seriesInfo", "versionPreferences", "thumbnailScrubber", "watchTogether", "userManager", "exclusiveElsewhere", "skins", "defaultSkin", "themes", "customMenuLinks", "optionalIncludes", "updateState", "homeScreenConfig", "infiniteScroll", "backups", "liveTvOnNowLimitPatched", "discoverySortOrdersPatched", "watchlist", "multiUserSession", "showCustomMenuLinksInTopNav", "homeScreen"]
+    for each key in cfg
+        if not inArray(known, key)
+            kefinLog("  unknown top-level setting '" + key + "' - ignored")
+        end if
+    end for
+
+    for each link in state.menuLinks
+        if link.kind = ""
+            kefinLog("  menu link '" + link.name + "' has no Roku equivalent - hidden")
+        else
+            kefinLog("  menu link '" + link.name + "' -> " + link.kind)
+        end if
+    end for
+
+    if isValid(cfg.LookupCI("homeScreen")) and not state.home.present
+        kefinLog("  legacy homeScreen settings found but no homeScreenConfig - home sections not shown")
+    end if
+    kefinLog("  home sections: " + state.home.sections.Count().toStr() + " enabled, discovery sections: " + state.home.discovery.sections.Count().toStr())
+end sub

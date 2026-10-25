@@ -1,3 +1,4 @@
+import "pkg:/components/kefin/KefinSearch.bs"
 import "pkg:/source/api/baserequest.bs"
 import "pkg:/source/api/Image.bs"
 import "pkg:/source/api/Items.bs"
@@ -19,6 +20,8 @@ sub init()
     m.searchHelpText.text = tr("You can search for Titles, People, Live TV Channels and more")
 
     m.loadStatus = ViewLoadStatus.INIT
+
+    kefinSearchInit()
 end sub
 
 sub searchMedias()
@@ -46,6 +49,7 @@ sub loadResults()
     m.searchRow.itemData = m.searchTask.results
     m.searchRow.query = m.top.SearchAlpha
     m.searchHelpText.visible = false
+    kefinSearchStart(m.top.SearchAlpha)
     if m.searchTask.results.TotalRecordCount = 0
         ' make sure focus is on the keyboard
         if m.searchRow.isinFocusChain()

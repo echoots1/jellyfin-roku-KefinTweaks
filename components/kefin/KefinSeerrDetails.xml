@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A Seerr title with its request status and request actions (via Jellyfin Enhanced) -->
+<component name="KefinSeerrDetails" extends="JFScreen">
+  <children>
+    <Poster id="backdrop" width="1920" height="1080" loadDisplayMode="scaleToZoom" opacity="0.3" />
+    <Poster id="poster" translation="[100, 160]" width="400" height="600" loadDisplayMode="scaleToFit" />
+    <LayoutGroup id="info" translation="[560, 150]" layoutDirection="vert" itemSpacings="[18]">
+      <Label id="title" width="1260" font="font:LargeBoldSystemFont" wrap="true" maxLines="2" />
+      <Label id="facts" width="1260" font="font:SmallSystemFont" color="#CCCCCC" />
+      <Label id="status" width="1260" font="font:MediumBoldSystemFont" />
+      <Label id="overview" width="1260" font="font:SmallSystemFont" wrap="true" maxLines="5" />
+      <LabelList id="actions" itemSize="[800, 56]" numRows="5" vertFocusAnimationStyle="floatingFocus" />
+      <Label id="message" width="1260" font="font:SmallBoldSystemFont" color="#FFCC66" />
+    </LayoutGroup>
+  </children>
+  <interface>
+    <field id="route" type="assocarray" onChange="onRouteChanged" />
+    <field id="selectedItem" type="node" alwaysNotify="true" />
+  </interface>
+</component>

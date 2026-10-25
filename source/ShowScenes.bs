@@ -810,7 +810,7 @@ function CreateSeriesDetailsGroup(seriesID as string) as dynamic
     end if
 
     ' Divert to season details if user setting goStraightToEpisodeListing is enabled and only one season exists.
-    if m.global.session.user.settings["ui.tvshows.goStraightToEpisodeListing"]
+    if m.global.session.user.settings["ui.tvshows.goStraightToEpisodeListing"] or kefinFlattenSingleSeason()
         if isChainValid(apiSeasonData, "items")
             if chainLookup(apiSeasonData, "items").count() = 1
                 stopLoadingSpinner()

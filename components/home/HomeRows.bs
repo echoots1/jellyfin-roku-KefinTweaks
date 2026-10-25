@@ -1,4 +1,5 @@
 import "pkg:/components/home/RadioStations.bs"
+import "pkg:/components/kefin/KefinHomeRows.bs"
 import "pkg:/source/constants/HomeRowItemSizes.bs"
 import "pkg:/source/enums/ItemType.bs"
 import "pkg:/source/enums/KeyCode.bs"
@@ -52,6 +53,8 @@ sub init()
 
     m.LoadMyListTask = createObject("roSGNode", "LoadItemsTask")
     m.LoadMyListTask.itemsToLoad = "mylist"
+
+    kefinHomeInit()
 end sub
 
 sub loadLibraries()
@@ -143,6 +146,8 @@ sub processUserSections()
 
     ' Start the timer for creating the content rows before we set the cursor size
     m.loadingTimer.control = "start"
+
+    kefinHomeRefresh()
 end sub
 
 ' onLibrariesLoaded: Handler when LoadLibrariesTask returns data

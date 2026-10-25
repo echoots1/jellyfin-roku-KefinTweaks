@@ -1,0 +1,272 @@
+' @fileoverview KefinTweaks home sections, imported into components/home/HomeRows.bs.
+'
+' Native rows (My Media, Continue Watching, Next Up, Recently Added...) are still built by the app
+' from the user's Jellyfin home settings, which KefinTweaks keeps in sync. This file adds the other
+' enabled KefinTweaks sections as extra rows and orders every row by KefinTweaks' section order.
+
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/kefin/KefinHome.bs"
+
+const KEFIN_DISCOVERY_ROW_COUNT = 6
+const KEFIN_DISCOVERY_BASE_ORDER = 100000
+const KEFIN_DISCOVERY_TTL_SECONDS = 21600
+' Favorites, My List and Radio Stations are Roku-only rows; keep them last
+const KEFIN_TAIL_ORDER = 1000000
+
+sub kefinHomeInit()
+    kefinEnsureGlobals()
+
+    m.kefinConfigTask = CreateObject("roSGNode", "KefinConfigTask")
+    m.kefinConfigTask.observeField("done", "kefinOnConfigLoaded")
+
+    m.kefinSectionsTask = CreateObject("roSGNode", "KefinSectionsTask")
+    m.kefinSectionsTask.observeField("row", "kefinOnRowBuilt")
+    m.kefinSectionsTask.observeField("finished", "kefinLogRowOrder")
+
+    m.kefinDiscoveryTask = CreateObject("roSGNode", "KefinSectionsTask")
+    m.kefinDiscoveryTask.observeField("row", "kefinOnRowBuilt")
+    m.kefinDiscoveryTask.observeField("finished", "kefinLogRowOrder")
+
+    m.kefinRowMeta = {}
+    m.kefinDiscoveryMeta = { builtAt: 0, stamp: "", count: 0 }
+    m.kefinNativeOrder = {}
+    m.kefinHomeActive = false
+end sub
+
+' Called at the end of processUserSections: first load and every return to Home
+sub kefinHomeRefresh()
+    if not isValid(m.kefinConfigTask) then return
+    if isStringEqual(m.kefinConfigTask.state, "run") then return
+    m.kefinConfigTask.control = "RUN"
+end sub
+
+sub kefinOnConfigLoaded()
+    state = kefinState()
+    homeOn = false
+    if isValid(state) and kefinIsOn("homeScreen", state)
+        homeOn = kefinBool(chainLookup(state, "home.present"), false)
+    end if
+
+    if not homeOn
+        if m.kefinHomeActive then kefinLog("Home sections off, showing the stock home screen")
+        m.kefinHomeActive = false
+        m.kefinNativeOrder = {}
+        kefinRemoveRows({}, false)
+        return
+    end if
+
+    m.kefinHomeActive = true
+    m.kefinNativeOrder = kefinAA(state.home.nativeOrder)
+    stamp = kefinStr(state.LookupCI("stamp"))
+    now = kefinNow()
+
+    ' Sections enabled in the config and, for seasonal ones, in season today
+    activeIds = {}
+    toBuild = []
+    for each section in state.home.sections
+        if not kefinSectionActiveToday(section) then continue for
+
+        rowId = kefinSectionRowId(section)
+        activeIds[rowId] = true
+
+        meta = m.kefinRowMeta.LookupCI(rowId)
+        stale = not isValid(meta)
+        if not stale then stale = not isStringEqual(meta.stamp, stamp) or now - meta.builtAt >= kefinSectionTtlSeconds(section)
+        if stale then toBuild.push(section)
+    end for
+
+    discoveryOn = kefinBool(chainLookup(state, "home.discovery.enabled"), false) and isValidAndNotEmpty(chainLookup(state, "home.discovery.sections"))
+    kefinRemoveRows(activeIds, discoveryOn)
+    kefinSortRows()
+
+    if toBuild.Count() > 0 and not isStringEqual(m.kefinSectionsTask.state, "run")
+        for each section in toBuild
+            m.kefinRowMeta[kefinSectionRowId(section)] = { builtAt: now, stamp: stamp }
+        end for
+        m.kefinSectionsTask.sections = toBuild
+        m.kefinSectionsTask.discovery = {}
+        m.kefinSectionsTask.root = kefinStr(state.LookupCI("root"))
+        m.kefinSectionsTask.watchlistAutoRemove = kefinIsOn("watchlist", state)
+        m.kefinSectionsTask.control = "RUN"
+    end if
+
+    if discoveryOn
+        discoveryStale = not isStringEqual(m.kefinDiscoveryMeta.stamp, stamp) or now - m.kefinDiscoveryMeta.builtAt >= KEFIN_DISCOVERY_TTL_SECONDS
+        if discoveryStale and not isStringEqual(m.kefinDiscoveryTask.state, "run")
+            m.kefinDiscoveryTask.sections = []
+            m.kefinDiscoveryTask.discovery = {
+                sections: state.home.discovery.sections,
+                settings: kefinAA(state.home.discovery.LookupCI("settings")),
+                homeSettings: kefinAA(state.home.LookupCI("settings")),
+                rowCount: KEFIN_DISCOVERY_ROW_COUNT,
+                baseOrder: KEFIN_DISCOVERY_BASE_ORDER,
+                previousCount: m.kefinDiscoveryMeta.count
+            }
+            m.kefinDiscoveryTask.root = kefinStr(state.LookupCI("root"))
+            m.kefinDiscoveryTask.control = "RUN"
+            m.kefinDiscoveryMeta = { builtAt: now, stamp: stamp, count: KEFIN_DISCOVERY_ROW_COUNT }
+        end if
+    end if
+end sub
+
+' Inserts, replaces or (when empty) removes a row built by KefinSectionsTask
+sub kefinOnRowBuilt(msg)
+    row = msg.getData()
+    if not isValid(row) or not row.hasField("kefinId") then return
+    if not m.kefinHomeActive then return
+
+    index = kefinFindRowIndex(row.kefinId)
+
+    if row.getChildCount() = 0
+        if index >= 0
+            m.top.content.removeChildIndex(index)
+            setRowItemSize()
+        end if
+        return
+    end if
+
+    ' The admin moved this section: take it out and insert it at its new place
+    if index >= 0 and m.top.content.getChild(index).kefinOrder <> row.kefinOrder
+        m.top.content.removeChildIndex(index)
+        index = -1
+    end if
+
+    if index >= 0
+        ' Keep the cursor on the same column when the focused row is refreshed
+        restoreColumn = invalid
+        rowItemFocused = chainLookupReturn(m.top, "rowItemFocused", invalid)
+        if isValidAndNotEmpty(rowItemFocused) and rowItemFocused[0] = index then restoreColumn = rowItemFocused[1]
+
+        m.top.content.replaceChild(row, index)
+        setRowItemSize()
+
+        if isValid(restoreColumn)
+            if restoreColumn >= row.getChildCount() then restoreColumn = row.getChildCount() - 1
+            m.top.jumpToRowItem = [index, restoreColumn]
+        end if
+        return
+    end if
+
+    m.top.content.insertChild(row, kefinInsertIndex(row.kefinOrder))
+    setRowItemSize()
+end sub
+
+function kefinFindRowIndex(rowId as string) as integer
+    if not isValid(m.top.content) then return -1
+    children = m.top.content.getChildren(-1, 0)
+    for i = 0 to children.Count() - 1
+        if children[i].hasField("kefinId") and isStringEqual(children[i].kefinId, rowId) then return i
+    end for
+    return -1
+end function
+
+' Removes KefinTweaks rows that are no longer enabled
+sub kefinRemoveRows(keepIds as object, keepDiscovery as boolean)
+    if not isValid(m.top.content) then return
+
+    removed = false
+    for i = m.top.content.getChildCount() - 1 to 0 step -1
+        child = m.top.content.getChild(i)
+        if not child.hasField("kefinId") then continue for
+
+        rowId = child.kefinId
+        if keepIds.DoesExist(rowId) then continue for
+        if keepDiscovery and Left(rowId, 16) = "kefin:discovery:" then continue for
+
+        m.top.content.removeChildIndex(i)
+        m.kefinRowMeta.Delete(rowId)
+        removed = true
+    end for
+
+    if not keepDiscovery then m.kefinDiscoveryMeta = { builtAt: 0, stamp: "", count: 0 }
+    if removed then setRowItemSize()
+end sub
+
+' Position for a new row: before the first row with a higher KefinTweaks order
+function kefinInsertIndex(order as integer) as integer
+    orders = kefinRowOrders()
+    for i = 0 to orders.Count() - 1
+        if orders[i] > order then return i
+    end for
+    return orders.Count()
+end function
+
+' Effective order of every row. Native rows take the order of their paired KefinTweaks section;
+' rows with no pairing keep their place by inheriting the order of the row above.
+function kefinRowOrders() as object
+    orders = []
+    if not isValid(m.top.content) then return orders
+
+    previous = 0
+    for each child in m.top.content.getChildren(-1, 0)
+        order = previous
+        if child.hasField("kefinOrder")
+            order = child.kefinOrder
+        else
+            order = kefinNativeRowOrder(child.title, previous)
+        end if
+        orders.push(order)
+        previous = order
+    end for
+    return orders
+end function
+
+function kefinNativeRowOrder(title as dynamic, previous as integer) as integer
+    if not isValid(title) then return previous
+
+    nativeId = ""
+    if isStringEqual(title, tr("My Media"))
+        nativeId = "smalllibrarytiles"
+    else if isStringEqual(title, tr("Continue Watching"))
+        nativeId = "resume"
+    else if isStringEqual(title, tr("Continue Listening"))
+        nativeId = "resumeaudio"
+    else if isStringEqual(title, tr("Next Up"))
+        nativeId = "nextup"
+    else if isStringEqual(title, tr("On Now"))
+        nativeId = "livetv"
+    else if LCase(title).StartsWith(LCase(tr("Recently Added in")))
+        nativeId = "latestmedia"
+    else if isFavoriteSectionTitle(title) or isStringEqual(title, tr("My List")) or isStringEqual(title, tr("Radio Stations"))
+        return KEFIN_TAIL_ORDER
+    end if
+
+    if nativeId = "" then return previous
+    order = m.kefinNativeOrder.LookupCI(nativeId)
+    if isValid(order) then return order
+    return previous
+end function
+
+' Moves native rows that the app appended out of place (e.g. Continue Watching coming back
+' after being empty) so the home screen follows the KefinTweaks order.
+sub kefinSortRows()
+    if not m.kefinHomeActive or not isValid(m.top.content) then return
+
+    for pass = 1 to 3
+        orders = kefinRowOrders()
+        moved = false
+        for i = 1 to orders.Count() - 1
+            if orders[i] < orders[i - 1]
+                child = m.top.content.getChild(i)
+                if child.hasField("kefinId") then continue for
+                m.top.content.removeChildIndex(i)
+                m.top.content.insertChild(child, kefinInsertIndex(orders[i]))
+                moved = true
+                exit for
+            end if
+        end for
+        if not moved then exit for
+    end for
+end sub
+
+' Prints the home rows in order to the debug console once a build finishes
+sub kefinLogRowOrder()
+    if not isValid(m.top.content) then return
+    titles = []
+    for each child in m.top.content.getChildren(-1, 0)
+        title = child.title
+        if not isValidAndNotEmpty(title) then title = "(untitled)"
+        titles.push(title)
+    end for
+    kefinLog("Home rows: " + titles.join(" | "))
+end sub

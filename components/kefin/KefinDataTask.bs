@@ -1,0 +1,306 @@
+import "pkg:/source/api/baserequest.bs"
+import "pkg:/source/kefin/KefinCards.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/kefin/KefinHttp.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Poster grid cell used by KefinGridScreen and KefinRowsScreen
+const KEFIN_POSTER_WIDTH = 230
+const KEFIN_POSTER_HEIGHT = 340
+const KEFIN_GRID_LIMIT = 300
+const KEFIN_CALENDAR_DAYS = 60
+
+sub init()
+    m.top.functionName = "loadData"
+end sub
+
+sub loadData()
+    request = m.top.request
+    mode = kefinStr(request.LookupCI("mode"))
+    m.userId = chainLookupReturn(m.global.session, "user.id", "")
+
+    try
+        if mode = "items"
+            m.top.content = loadItems(kefinAA(request.LookupCI("params")))
+        else if mode = "seerrSearch"
+            m.top.content = loadSeerrSearch(kefinStr(request.LookupCI("query")))
+        else if mode = "seerrDiscover"
+            m.top.content = loadSeerrDiscover()
+        else if mode = "seerrRequests"
+            m.top.content = loadSeerrRequests()
+        else if mode = "calendar"
+            m.top.content = loadCalendar()
+        else if mode = "seerrDetails"
+            m.top.result = loadSeerrDetails(kefinStr(request.LookupCI("mediaType")), kefinStr(request.LookupCI("tmdbId")))
+        else if mode = "seerrRequest"
+            m.top.result = sendSeerrRequest(kefinAA(request.LookupCI("body")))
+        else if mode = "setWatchlist"
+            ' KefinTweaks keeps the Watchlist in the item's "Likes" user data
+            response = kefinRequest("POST", "/UserItems/" + kefinStr(request.LookupCI("itemId")) + "/Rating", { userId: m.userId, likes: kefinBool(request.LookupCI("likes"), false) })
+            m.top.result = { ok: response.ok }
+        else
+            kefinLog("Unknown data request '" + mode + "'")
+        end if
+    catch e
+        kefinLog("Loading " + mode + " failed: " + e.message)
+        m.top.result = { ok: false, message: e.message }
+    end try
+
+    m.top.done = true
+end sub
+
+function newContent() as object
+    return CreateObject("roSGNode", "ContentNode")
+end function
+
+sub addPosterCard(parent as object, card as dynamic)
+    if not isValid(card) then return
+    card.imageDimensions = [KEFIN_POSTER_WIDTH, KEFIN_POSTER_HEIGHT]
+    parent.appendChild(card)
+end sub
+
+' A grid of Jellyfin items (genre, studio, tag, watchlist)
+function loadItems(params as object) as object
+    content = newContent()
+    query = {}
+    for each key in params
+        query[key] = params[key]
+    end for
+    query.userId = m.userId
+    query.Fields = "PrimaryImageAspectRatio,ProductionYear,Status,EndDate,ChildCount"
+    query.EnableImageTypes = "Primary,Backdrop,Thumb"
+    query.ImageTypeLimit = 1
+    if not isValid(query.LookupCI("Limit")) then query.Limit = KEFIN_GRID_LIMIT
+
+    for each item in kefinResponseItems(kefinGetJson("/Items", query))
+        addPosterCard(content, kefinItemCard(item, 180))
+    end for
+    return content
+end function
+
+' Seerr titles matching a search, leaving out ones already in the library
+function loadSeerrSearch(query as string) as object
+    content = newContent()
+    if query.Trim() = "" then return content
+
+    response = kefinGetJson("/JellyfinEnhanced/jellyseerr/search", { query: query, page: 1 })
+    for each result in kefinArr(chainLookup(response, "results"))
+        if kefinInt(chainLookup(result, "mediaInfo.status"), 0) = 5 then continue for
+        addPosterCard(content, kefinSeerrCard(result))
+    end for
+    return content
+end function
+
+' Rows for the Seerr Discover screen
+function loadSeerrDiscover() as object
+    content = newContent()
+    sources = [
+        { title: "Trending", path: "/JellyfinEnhanced/jellyseerr/discover/trending" },
+        { title: "Popular Movies", path: "/JellyfinEnhanced/jellyseerr/discover/movies" },
+        { title: "Popular Shows", path: "/JellyfinEnhanced/jellyseerr/discover/tv" },
+        { title: "Upcoming Movies", path: "/JellyfinEnhanced/jellyseerr/discover/movies/upcoming" },
+        { title: "Upcoming Shows", path: "/JellyfinEnhanced/jellyseerr/discover/tv/upcoming" }
+    ]
+
+    for each source in sources
+        response = kefinGetJson(source.path, { page: 1 })
+        row = newContent()
+        row.title = tr(source.title)
+        for each result in kefinArr(chainLookup(response, "results"))
+            ' Discover results for one media type may leave mediaType out
+            if not isValid(result.LookupCI("mediaType"))
+                if Instr(1, source.path, "/tv") > 0
+                    result.mediaType = "tv"
+                else
+                    result.mediaType = "movie"
+                end if
+            end if
+            addPosterCard(row, kefinSeerrCard(result))
+        end for
+        if row.getChildCount() > 0 then content.appendChild(row)
+    end for
+    return content
+end function
+
+' Seerr requests (Jellyfin Enhanced "Requests" page)
+function loadSeerrRequests() as object
+    content = newContent()
+    response = kefinGetJson("/JellyfinEnhanced/arr/requests", { take: 100, skip: 0 })
+
+    for each request in kefinArr(chainLookup(response, "requests"))
+        tmdbId = kefinStr(request.LookupCI("tmdbId"))
+        mediaType = LCase(kefinStr(request.LookupCI("type"), "movie"))
+        title = kefinStr(request.LookupCI("title"), "Unknown")
+        if tmdbId = "" then continue for
+
+        card = CreateObject("roSGNode", "KefinCardData")
+        card.json = { Id: "request-" + kefinStr(request.LookupCI("id")), Name: title, Type: "KefinSeerr" }
+        card.title = title
+        subtitle = kefinStr(request.LookupCI("mediaStatus"))
+        year = kefinStr(request.LookupCI("year"))
+        if year <> "" then subtitle = year + "  " + subtitle
+        card.SubTitle = subtitle
+        card.posterURL = absoluteImageUrl(kefinStr(request.LookupCI("posterUrl")))
+        card.kefinRoute = { kind: "seerrDetails", tmdbId: tmdbId, mediaType: mediaType, title: title }
+        addPosterCard(content, card)
+    end for
+    return content
+end function
+
+' Upcoming releases from Sonarr/Radarr (Jellyfin Enhanced "Calendar" page)
+function loadCalendar() as object
+    content = newContent()
+
+    startDate = CreateObject("roDateTime")
+    endDate = CreateObject("roDateTime")
+    endDate.FromSeconds(startDate.AsSeconds() + KEFIN_CALENDAR_DAYS * 86400)
+    response = kefinGetJson("/JellyfinEnhanced/arr/calendar", { start: Left(startDate.ToISOString(), 10), end: Left(endDate.ToISOString(), 10) }, 30000)
+
+    ' Soonest first (ISO dates sort as text)
+    events = []
+    for each event in kefinArr(chainLookup(response, "events"))
+        if LCase(type(event)) <> "roassociativearray" then continue for
+        releaseDate = kefinStr(event.LookupCI("ReleaseDate"))
+        insertAt = events.Count()
+        for i = 0 to events.Count() - 1
+            if releaseDate < kefinStr(events[i].LookupCI("ReleaseDate"))
+                insertAt = i
+                exit for
+            end if
+        end for
+        events = arrayInsert(events, insertAt, event)
+    end for
+
+    for each event in events
+        title = kefinStr(event.LookupCI("Title"), "Unknown")
+        eventType = LCase(kefinStr(event.LookupCI("Type")))
+        itemId = kefinStr(event.LookupCI("ItemId"))
+        tmdbId = kefinStr(event.LookupCI("TmdbId"))
+
+        card = CreateObject("roSGNode", "KefinCardData")
+        card.json = { Id: "calendar-" + kefinStr(event.LookupCI("Id"), title), Name: title, Type: "KefinSeerr" }
+        card.title = title
+
+        subtitle = shortDate(kefinStr(event.LookupCI("ReleaseDate")))
+        detail = kefinStr(event.LookupCI("Subtitle"))
+        if detail = "" then detail = kefinStr(event.LookupCI("ReleaseType"))
+        if detail <> "" then subtitle = subtitle + "  " + detail
+        card.SubTitle = subtitle
+        card.posterURL = absoluteImageUrl(kefinStr(event.LookupCI("PosterUrl")))
+
+        if itemId <> "" and kefinBool(event.LookupCI("HasFile"), false)
+            card.kefinRoute = { kind: "jellyfinId", id: itemId, title: title }
+        else if tmdbId <> ""
+            mediaType = "tv"
+            if Instr(1, eventType, "movie") > 0 then mediaType = "movie"
+            card.kefinRoute = { kind: "seerrDetails", tmdbId: tmdbId, mediaType: mediaType, title: title }
+        else if itemId <> ""
+            card.kefinRoute = { kind: "jellyfinId", id: itemId, title: title }
+        else
+            card.kefinRoute = { kind: "none" }
+        end if
+        addPosterCard(content, card)
+    end for
+    return content
+end function
+
+' Seerr details for the request screen
+function loadSeerrDetails(mediaType as string, tmdbId as string) as object
+    if mediaType <> "tv" then mediaType = "movie"
+    data = kefinGetJson("/JellyfinEnhanced/jellyseerr/" + mediaType + "/" + tmdbId)
+    if LCase(type(data)) <> "roassociativearray" then return { ok: false, message: tr("Could not load details from Seerr") }
+
+    title = kefinStr(data.LookupCI("title"))
+    if title = "" then title = kefinStr(data.LookupCI("name"))
+    dateText = kefinStr(data.LookupCI("releaseDate"))
+    if dateText = "" then dateText = kefinStr(data.LookupCI("firstAirDate"))
+
+    genres = []
+    for each genre in kefinArr(data.LookupCI("genres"))
+        name = kefinStr(chainLookup(genre, "name"))
+        if name <> "" then genres.push(name)
+    end for
+
+    status = kefinInt(chainLookup(data, "mediaInfo.status"), 1)
+    result = {
+        ok: true,
+        mediaType: mediaType,
+        tmdbId: tmdbId,
+        title: title,
+        year: Left(dateText, 4),
+        overview: kefinStr(data.LookupCI("overview")),
+        genres: genres.join(", "),
+        status: status,
+        statusText: kefinSeerrStatusText(status),
+        jellyfinId: kefinStr(chainLookup(data, "mediaInfo.jellyfinMediaId")),
+        posterUrl: "",
+        backdropUrl: "",
+        seasons: []
+    }
+
+    posterPath = kefinStr(data.LookupCI("posterPath"))
+    if posterPath <> "" then result.posterUrl = KEFIN_TMDB_POSTER_URL + posterPath
+    backdropPath = kefinStr(data.LookupCI("backdropPath"))
+    if backdropPath <> "" then result.backdropUrl = KEFIN_TMDB_BACKDROP_URL + backdropPath
+
+    if mediaType = "tv"
+        seasonStatus = {}
+        for each season in kefinArr(chainLookup(data, "mediaInfo.seasons"))
+            seasonStatus[kefinStr(season.LookupCI("seasonNumber"))] = kefinInt(season.LookupCI("status"), 1)
+        end for
+        for each season in kefinArr(data.LookupCI("seasons"))
+            number = kefinInt(season.LookupCI("seasonNumber"), 0)
+            if number <= 0 then continue for
+            seasonState = seasonStatus.LookupCI(number.toStr())
+            if not isValid(seasonState) then seasonState = 1
+            result.seasons.push({
+                number: number,
+                name: kefinStr(season.LookupCI("name"), "Season " + number.toStr()),
+                status: seasonState
+            })
+        end for
+    end if
+
+    return result
+end function
+
+' Sends a request to Seerr through Jellyfin Enhanced, as the signed-in user
+function sendSeerrRequest(body as object) as object
+    response = kefinPostJson("/JellyfinEnhanced/jellyseerr/request", invalid, body, 20000)
+    if response.ok then return { ok: true, message: tr("Request sent") }
+
+    message = kefinStr(chainLookup(response.json, "message"))
+    if message = "" then message = tr("Request failed") + " (" + response.code.toStr() + ")"
+    kefinLog("Seerr request failed: " + response.code.toStr() + " " + message)
+    return { ok: false, message: message }
+end function
+
+' Image urls from Jellyfin Enhanced may be server-relative
+function absoluteImageUrl(url as string) as string
+    if url = "" then return ""
+    if LCase(Left(url, 4)) = "http" then return url
+    if Left(url, 1) = "/"
+        fullUrl = buildURL(url)
+        if isValid(fullUrl) then return fullUrl
+    end if
+    return ""
+end function
+
+function arrayInsert(source as object, index as integer, value as dynamic) as object
+    result = []
+    for i = 0 to source.Count() - 1
+        if i = index then result.push(value)
+        result.push(source[i])
+    end for
+    if index >= source.Count() then result.push(value)
+    return result
+end function
+
+function shortDate(isoDate as string) as string
+    if Len(isoDate) < 10 then return isoDate
+    date = CreateObject("roDateTime")
+    date.FromISO8601String(isoDate)
+    date.ToLocalTime()
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    return date.GetWeekday().Left(3) + " " + months[date.GetMonth() - 1] + " " + date.GetDayOfMonth().toStr()
+end function

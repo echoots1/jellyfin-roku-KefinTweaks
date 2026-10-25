@@ -1,0 +1,149 @@
+' @fileoverview KefinTweaks support: shared state and safe value helpers.
+'
+' The KefinTweaks config is fetched by KefinConfigTask and stored, already reduced to what the
+' Roku app uses, in m.global.kefin. Everything here is safe to call from any thread and returns
+' stock app behavior (false / default) whenever that state is missing.
+
+import "pkg:/source/utils/misc.bs"
+
+' Prints a tagged line to the debug console (telnet <roku-ip> 8085)
+sub kefinLog(message as string)
+    print "[KefinTweaks] " + message
+end sub
+
+' Adds the global fields this feature uses. Safe to call repeatedly.
+sub kefinEnsureGlobals()
+    if not m.global.hasField("kefin")
+        m.global.addFields({ kefin: { ok: false } })
+    end if
+    if not m.global.hasField("kefinCache")
+        m.global.addFields({ kefinCache: {} })
+    end if
+end sub
+
+' Returns the reduced KefinTweaks state when a config was loaded and KefinTweaks is enabled, else invalid
+function kefinState() as dynamic
+    if not m.global.hasField("kefin") then return invalid
+    state = m.global.kefin
+    if type(state) <> "roAssociativeArray" then return invalid
+    if not kefinBool(state.ok, false) then return invalid
+    if not kefinBool(state.enabled, false) then return invalid
+    return state
+end function
+
+' Returns true when the named KefinTweaks script (config.scripts.<name>) is enabled
+function kefinIsOn(scriptName as string, state = invalid as dynamic) as boolean
+    if not isValid(state) then state = kefinState()
+    if not isValid(state) then return false
+    return kefinBool(chainLookup(state, "scripts." + scriptName), false)
+end function
+
+' Returns true when Seerr requests can be made through Jellyfin Enhanced for this user
+function kefinSeerrReady(state = invalid as dynamic) as boolean
+    if not isValid(state) then state = kefinState()
+    if not isValid(state) then return false
+    return kefinBool(chainLookup(state, "seerr.active"), false) and kefinBool(chainLookup(state, "seerr.linked"), false)
+end function
+
+' Seerr results in search: KefinTweaks search script + search.enableJellyseerr + a linked Seerr user
+function kefinSeerrSearchOn(state = invalid as dynamic) as boolean
+    if not isValid(state) then state = kefinState()
+    if not isValid(state) then return false
+    if not kefinIsOn("search", state) then return false
+    if not kefinBool(chainLookup(state, "search.enableJellyseerr"), false) then return false
+    return kefinSeerrReady(state)
+end function
+
+' flattenSingleSeasonShows: open single-season shows straight on their episode list
+function kefinFlattenSingleSeason() as boolean
+    return kefinIsOn("flattenSingleSeasonShows")
+end function
+
+function kefinBool(value as dynamic, default as boolean) as boolean
+    valueType = LCase(type(value))
+    if valueType = "boolean" or valueType = "roboolean" then return value
+    if valueType = "string" or valueType = "rostring"
+        lowered = LCase(value)
+        if lowered = "true" then return true
+        if lowered = "false" then return false
+    end if
+    return default
+end function
+
+function kefinStr(value as dynamic, default = "" as string) as string
+    valueType = LCase(type(value))
+    if valueType = "string" or valueType = "rostring" then return value
+    if kefinIsNumberType(valueType) then return kefinNumberToString(value)
+    return default
+end function
+
+function kefinInt(value as dynamic, default = 0 as integer) as integer
+    valueType = LCase(type(value))
+    if kefinIsNumberType(valueType) then return Int(value)
+    if valueType = "string" or valueType = "rostring"
+        if value.Trim() <> "" then return value.Trim().ToInt()
+    end if
+    return default
+end function
+
+function kefinFloat(value as dynamic, default = 0.0 as float) as float
+    valueType = LCase(type(value))
+    if kefinIsNumberType(valueType) then return value
+    if valueType = "string" or valueType = "rostring"
+        if value.Trim() <> "" then return value.Trim().ToFloat()
+    end if
+    return default
+end function
+
+function kefinArr(value as dynamic) as object
+    if LCase(type(value)) = "roarray" then return value
+    return []
+end function
+
+function kefinAA(value as dynamic) as object
+    if LCase(type(value)) = "roassociativearray" then return value
+    return {}
+end function
+
+function kefinIsNumberType(valueType as string) as boolean
+    return inArray(["integer", "roint", "rointeger", "longinteger", "rolonginteger", "float", "rofloat", "double", "rodouble"], valueType)
+end function
+
+function kefinNumberToString(value as dynamic) as string
+    valueType = LCase(type(value))
+    if inArray(["float", "rofloat", "double", "rodouble"], valueType)
+        if value = Int(value) then return Int(value).toStr()
+        return Str(value).Trim()
+    end if
+    return value.toStr()
+end function
+
+' Shows a Watchlist button's state. Works for ButtonData (movie screen) and IconButton (series screen).
+sub kefinApplyWatchlistButton(button as object, onWatchlist as boolean)
+    if not button.hasField("kefinOnWatchlist") then button.addFields({ kefinOnWatchlist: false })
+    button.kefinOnWatchlist = onWatchlist
+
+    iconFolder = "pkg:/images/icons/"
+    if button.isSubtype("ButtonData") then iconFolder = "pkg:/images/icons/36px/"
+
+    if onWatchlist
+        button.icon = iconFolder + "check.png"
+    else
+        button.icon = iconFolder + "plus.png"
+    end if
+    if button.hasField("focusIcon") then button.focusIcon = button.icon
+
+    ' The series screen's icon buttons only fit one short word
+    if button.isSubtype("IconButton")
+        button.text = tr("Watchlist")
+    else if onWatchlist
+        button.text = tr("On Watchlist")
+    else
+        button.text = tr("Add To Watchlist")
+    end if
+end sub
+
+' Current time in whole seconds since the epoch
+function kefinNow() as integer
+    return CreateObject("roDateTime").AsSeconds()
+end function

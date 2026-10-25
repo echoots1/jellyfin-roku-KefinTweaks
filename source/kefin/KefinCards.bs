@@ -1,0 +1,176 @@
+' @fileoverview KefinTweaks support: builds KefinCardData nodes for rows and grids.
+' Jellyfin items keep their normal type, so the app opens them exactly as it would from any other row.
+
+import "pkg:/source/api/Image.bs"
+import "pkg:/source/constants/ImageSizes.bs"
+import "pkg:/source/enums/ImageType.bs"
+import "pkg:/source/enums/ItemType.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/utils/misc.bs"
+
+const KEFIN_TMDB_POSTER_URL = "https://image.tmdb.org/t/p/w300"
+const KEFIN_TMDB_BACKDROP_URL = "https://image.tmdb.org/t/p/w780"
+
+' Card for a Jellyfin item (movie, series, episode, collection...)
+function kefinItemCard(item as object, imageWidth as integer) as dynamic
+    if LCase(type(item)) <> "roassociativearray" then return invalid
+
+    mediaKind = kefinStr(item.LookupCI("Type"))
+    if mediaKind = "Genre" or mediaKind = "Studio" or mediaKind = "MusicGenre"
+        return kefinFolderCard(item, kefinFilterRoute(item, invalid), imageWidth)
+    end if
+
+    ' HomeData reads UserData.Played for videos, so make sure it is there
+    userData = item.LookupCI("UserData")
+    if LCase(type(userData)) <> "roassociativearray"
+        userData = {}
+        item.UserData = userData
+    end if
+    if not isValid(userData.LookupCI("Played")) then userData.Played = false
+
+    node = CreateObject("roSGNode", "KefinCardData")
+    node.json = item
+    node.title = kefinStr(item.LookupCI("Name"))
+    node.usePoster = true
+    node.imageWidth = imageWidth
+
+    year = kefinStr(item.LookupCI("ProductionYear"))
+    if year <> "" then node.SubTitle = year
+
+    ' HomeData doesn't pick images for these types, so set them here
+    if inArray([ItemType.BOXSET, ItemType.PLAYLIST, ItemType.FOLDER, ItemType.SEASON], mediaKind)
+        poster = FirstItemImageURL(item, [ImageType.PRIMARY, ImageType.THUMB, ImageType.BACKDROP], imageSizes.HOME_TILE)
+        wide = FirstItemImageURL(item, [ImageType.THUMB, ImageType.BACKDROP, ImageType.PRIMARY], imageSizes.HOME_TILE)
+        if imageWidth <= 180
+            node.posterURL = poster
+        else
+            node.posterURL = wide
+        end if
+        node.widePosterURL = wide
+        node.thumbnailURL = wide
+    end if
+
+    if not isValidAndNotEmpty(node.posterURL)
+        node.posterURL = ItemImageURL(item, ImageType.PRIMARY, imageSizes.HOME_TILE)
+    end if
+
+    return node
+end function
+
+' Card that opens a filtered grid (genre, studio, tag) or another target described by route
+function kefinFolderCard(item as object, route as dynamic, imageWidth as integer, artUrl = "" as string) as object
+    name = kefinStr(item.LookupCI("Name"))
+
+    node = CreateObject("roSGNode", "KefinCardData")
+    node.json = {
+        Id: kefinStr(item.LookupCI("Id"), name),
+        Name: name,
+        Type: ItemType.FOLDER,
+        KefinType: kefinStr(item.LookupCI("Type"))
+    }
+    node.title = name
+    node.usePoster = true
+    node.imageWidth = imageWidth
+    if isValid(route) then node.kefinRoute = route
+
+    poster = artUrl
+    wide = artUrl
+    if poster = ""
+        poster = FirstItemImageURL(item, [ImageType.PRIMARY, ImageType.THUMB, ImageType.BACKDROP], imageSizes.HOME_TILE, false)
+        wide = FirstItemImageURL(item, [ImageType.THUMB, ImageType.BACKDROP, ImageType.PRIMARY], imageSizes.HOME_TILE, false)
+    end if
+
+    if imageWidth <= 180
+        node.posterURL = poster
+        node.widePosterURL = poster
+    else
+        node.posterURL = wide
+        node.widePosterURL = wide
+    end if
+    node.thumbnailURL = node.widePosterURL
+    return node
+end function
+
+' Route that opens a grid of the items in a genre or studio, limited like the source query
+function kefinFilterRoute(item as object, sourceOptions as dynamic) as object
+    mediaKind = kefinStr(item.LookupCI("Type"))
+    params = {
+        Recursive: true,
+        SortBy: "SortName",
+        SortOrder: "Ascending"
+    }
+
+    if mediaKind = "Studio"
+        params.StudioIds = kefinStr(item.LookupCI("Id"))
+    else
+        params.GenreIds = kefinStr(item.LookupCI("Id"))
+    end if
+
+    options = kefinAA(sourceOptions)
+    includeTypes = options.LookupCI("IncludeItemTypes")
+    if isValid(includeTypes)
+        params.IncludeItemTypes = includeTypes
+    else
+        params.IncludeItemTypes = "Movie,Series"
+    end if
+    parentId = options.LookupCI("ParentId")
+    if isValidAndNotEmpty(parentId) then params.ParentId = parentId
+
+    return { kind: "grid", title: kefinStr(item.LookupCI("Name")), params: params }
+end function
+
+' Card for a Seerr (TMDB) search/discover result
+function kefinSeerrCard(result as object) as dynamic
+    if LCase(type(result)) <> "roassociativearray" then return invalid
+
+    mediaType = LCase(kefinStr(result.LookupCI("mediaType")))
+    if mediaType <> "movie" and mediaType <> "tv" then return invalid
+
+    tmdbId = kefinStr(result.LookupCI("id"))
+    if tmdbId = "" then tmdbId = kefinStr(result.LookupCI("tmdbId"))
+    if tmdbId = "" then return invalid
+
+    title = kefinStr(result.LookupCI("title"))
+    if title = "" then title = kefinStr(result.LookupCI("name"))
+
+    dateText = kefinStr(result.LookupCI("releaseDate"))
+    if dateText = "" then dateText = kefinStr(result.LookupCI("firstAirDate"))
+    year = Left(dateText, 4)
+
+    status = kefinInt(chainLookup(result, "mediaInfo.status"), 0)
+    jellyfinId = kefinStr(chainLookup(result, "mediaInfo.jellyfinMediaId"))
+
+    node = CreateObject("roSGNode", "KefinCardData")
+    node.json = { Id: "seerr-" + mediaType + "-" + tmdbId, Name: title, Type: "KefinSeerr" }
+    node.title = title
+    subtitle = kefinSeerrStatusText(status)
+    if mediaType = "tv"
+        subtitle = "TV - " + subtitle
+    else
+        subtitle = "Movie - " + subtitle
+    end if
+    if year <> "" then subtitle = year + "  " + subtitle
+    node.SubTitle = subtitle
+
+    posterPath = kefinStr(result.LookupCI("posterPath"))
+    if posterPath <> "" then node.posterURL = KEFIN_TMDB_POSTER_URL + posterPath
+
+    node.kefinRoute = {
+        kind: "seerrDetails",
+        tmdbId: tmdbId,
+        mediaType: mediaType,
+        title: title,
+        jellyfinId: jellyfinId
+    }
+    return node
+end function
+
+' Seerr media status (MediaStatus enum in Seerr) as shown on cards
+function kefinSeerrStatusText(status as integer) as string
+    if status = 2 then return "Requested"
+    if status = 3 then return "Processing"
+    if status = 4 then return "Partly available"
+    if status = 5 then return "Available"
+    if status = 6 then return "Unavailable"
+    return "Not requested"
+end function

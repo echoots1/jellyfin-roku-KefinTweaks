@@ -1,0 +1,673 @@
+import "pkg:/source/constants/HomeRowItemSizes.bs"
+import "pkg:/source/kefin/KefinCards.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/kefin/KefinHome.bs"
+import "pkg:/source/kefin/KefinHttp.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Fields every row item needs so the home tiles can draw images, progress and watched state
+const KEFIN_ITEM_FIELDS = "PrimaryImageAspectRatio,ProductionYear,Status,EndDate,ChildCount,Genres"
+const KEFIN_IMDB_TOP_250_URL = "https://raw.githubusercontent.com/theapache64/top250/master/top250_min.json"
+const KEFIN_IMDB_CACHE_SECONDS = 86400
+' Discovery picks a random genre/person/title; give up on a section after this many candidates
+const KEFIN_DISCOVERY_CANDIDATES = 4
+const KEFIN_DISCOVERY_MIN_ITEMS = 4
+
+sub init()
+    m.top.functionName = "buildSections"
+end sub
+
+sub buildSections()
+    m.userId = chainLookupReturn(m.global.session, "user.id", "")
+    if not isValidAndNotEmpty(m.userId)
+        m.top.finished = true
+        return
+    end if
+
+    for each section in kefinArr(m.top.sections)
+        built = invalid
+        try
+            built = buildSection(section)
+        catch e
+            kefinLog("Home section '" + kefinStr(section.LookupCI("name")) + "' failed: " + e.message)
+        end try
+        emitRow(kefinSectionRowId(section), kefinInt(section.LookupCI("order"), 0), built)
+    end for
+
+    discovery = m.top.discovery
+    if isValid(discovery) and isValidAndNotEmpty(discovery.LookupCI("sections"))
+        try
+            buildDiscoveryRows(discovery)
+        catch e
+            kefinLog("Discovery sections failed: " + e.message)
+        end try
+    end if
+
+    m.top.finished = true
+end sub
+
+' Sends a finished row to HomeRows. A row with no items tells HomeRows to remove it.
+sub emitRow(rowId as string, order as integer, built as dynamic)
+    row = CreateObject("roSGNode", "HomeRow")
+    row.addFields({ kefinId: rowId, kefinOrder: order })
+
+    if isValid(built)
+        size = built.size
+        row.title = built.title
+        row.imageWidth = size[0]
+        row.cursorSize = size
+        row.usePoster = true
+        for each item in built.items
+            row.appendChild(item)
+        end for
+    end if
+
+    m.top.row = row
+end sub
+
+' ------------------------------------------------------------------------------------------
+' Regular home, seasonal and custom sections
+' ------------------------------------------------------------------------------------------
+
+' Returns { title, size, items } or invalid when the section has nothing to show
+function buildSection(section as object) as dynamic
+    renderMode = kefinStr(section.LookupCI("renderMode"))
+    size = kefinCardSize(kefinStr(section.LookupCI("cardFormat"), "Thumb"), renderMode)
+    title = kefinStr(section.LookupCI("name"))
+
+    queries = kefinArr(section.LookupCI("queries"))
+    staticItems = kefinArr(section.LookupCI("items"))
+
+    if queries.Count() = 0 and staticItems.Count() > 0
+        cards = buildStaticCards(staticItems, size[0])
+        if kefinStr(section.LookupCI("sortBy")) = "Random" then shuffleArray(cards)
+        return finishSection(section, title, size, cards)
+    end if
+
+    if queries.Count() = 0 then return invalid
+
+    ' "Pick Your Poison" style sections run one random query of several
+    if kefinBool(section.LookupCI("useRandomQuery"), false) and queries.Count() > 1
+        query = queries[Rnd(queries.Count()) - 1]
+        queries = [query]
+        queryName = kefinStr(query.LookupCI("name"))
+        if kefinBool(section.LookupCI("useQueryNamesForSection"), false) and queryName <> ""
+            label = kefinStr(section.LookupCI("multiQueryPickerLabel"))
+            if label <> ""
+                title = label + ": " + queryName
+            else
+                title = queryName
+            end if
+        end if
+    end if
+
+    rawItems = []
+    seen = {}
+    for each query in queries
+        for each item in runSectionQuery(query)
+            itemId = kefinStr(item.LookupCI("Id"))
+            if itemId = "" or seen.DoesExist(itemId) then continue for
+            seen[itemId] = true
+            rawItems.push({ item: item, options: kefinAA(query.LookupCI("queryOptions")) })
+        end for
+    end for
+
+    if isWatchlistSection(queries) and m.top.watchlistAutoRemove
+        rawItems = removeWatchedFromWatchlist(rawItems)
+    end if
+
+    if kefinStr(section.LookupCI("sortBy")) = "Random" or queries.Count() > 1
+        shuffleArray(rawItems)
+    end if
+
+    cards = []
+    for each entry in rawItems
+        card = invalid
+        entryType = kefinStr(entry.item.LookupCI("Type"))
+        if entryType = "Genre" or entryType = "Studio"
+            card = kefinFolderCard(entry.item, kefinFilterRoute(entry.item, entry.options), size[0])
+        else
+            card = kefinItemCard(entry.item, size[0])
+        end if
+        if isValid(card) then cards.push(card)
+    end for
+
+    return finishSection(section, title, size, cards)
+end function
+
+function finishSection(section as object, title as string, size as object, cards as object) as dynamic
+    itemLimit = kefinInt(section.LookupCI("itemLimit"), 0)
+    if itemLimit > 0 and cards.Count() > itemLimit
+        trimmed = []
+        for i = 0 to itemLimit - 1
+            trimmed.push(cards[i])
+        end for
+        cards = trimmed
+    end if
+
+    if cards.Count() = 0 then return invalid
+    return { title: title, size: size, items: cards }
+end function
+
+' Runs one section query and returns the raw items
+function runSectionQuery(query as object) as object
+    options = kefinAA(query.LookupCI("queryOptions"))
+
+    dataSource = kefinStr(query.LookupCI("dataSource"))
+    if dataSource <> ""
+        if dataSource = "MoviesCache.getImdbTop250Movies" then return imdbTop250Items(options)
+        kefinLog("Unsupported section data source " + dataSource + " - skipped")
+        return []
+    end if
+
+    path = kefinStr(query.LookupCI("path"), "/Items")
+    if path = "/LiveTv/Timers" or path = "/UserViews"
+        kefinLog("Section query " + path + " has no Roku row - skipped")
+        return []
+    end if
+
+    params = buildQueryParams(path, options)
+    applyAgeWindow(params, query)
+
+    return kefinResponseItems(kefinGetJson(path, params))
+end function
+
+' Copies the KefinTweaks query options and adds what the Roku tiles need
+function buildQueryParams(path as string, options as object) as object
+    params = {}
+    for each key in options
+        params[key] = options[key]
+    end for
+
+    ' KefinTweaks uses Limit 0 to mean "no limit"
+    limit = params.LookupCI("Limit")
+    if isValid(limit) and kefinInt(limit, 1) = 0 then params.Delete("Limit")
+
+    params.userId = m.userId
+
+    if path = "/Items" or path = "/Items/Latest" or path = "/Genres" or path = "/Studios"
+        if path = "/Items" and not isValid(params.LookupCI("Recursive")) then params.Recursive = true
+        params.Fields = mergeFields(params.LookupCI("Fields"), KEFIN_ITEM_FIELDS)
+    end if
+
+    if not isValid(params.LookupCI("EnableImageTypes")) then params.EnableImageTypes = "Primary,Backdrop,Thumb"
+    if not isValid(params.LookupCI("ImageTypeLimit")) then params.ImageTypeLimit = 1
+
+    return params
+end function
+
+' "Recently released" sections give minAge/maxAge in days instead of dates
+sub applyAgeWindow(params as object, query as object)
+    maxAge = query.LookupCI("maxAge")
+    minAge = query.LookupCI("minAge")
+    if isValid(maxAge) then params.MinPremiereDate = isoDateDaysAgo(kefinInt(maxAge, 0))
+    if isValid(minAge) and kefinInt(minAge, 0) > 0 then params.MaxPremiereDate = isoDateDaysAgo(kefinInt(minAge, 0))
+end sub
+
+function isoDateDaysAgo(days as integer) as string
+    date = CreateObject("roDateTime")
+    date.FromSeconds(date.AsSeconds() - days * 86400)
+    return date.ToISOString()
+end function
+
+function mergeFields(existing as dynamic, extra as string) as string
+    fields = {}
+    ordered = []
+    existingText = kefinParamValue(existing)
+    if not isValid(existingText) then existingText = ""
+    for each name in (existingText + "," + extra).Split(",")
+        name = name.Trim()
+        if name <> "" and not fields.DoesExist(name)
+            fields[name] = true
+            ordered.push(name)
+        end if
+    end for
+    return ordered.join(",")
+end function
+
+function isWatchlistSection(queries as object) as boolean
+    for each query in queries
+        filters = kefinParamValue(chainLookup(query, "queryOptions.Filters"))
+        if isValid(filters) and Instr(1, LCase(filters), "likes") > 0 then return true
+    end for
+    return false
+end function
+
+' KefinTweaks removes watched items from the Watchlist (watchlist.js syncWatchedStatusToWatchlist)
+function removeWatchedFromWatchlist(entries as object) as object
+    kept = []
+    for each entry in entries
+        played = kefinBool(chainLookup(entry.item, "UserData.Played"), false)
+        mediaKind = kefinStr(entry.item.LookupCI("Type"))
+        if played and inArray(["Movie", "Episode", "Series", "Season", "Video", "MusicVideo"], mediaKind)
+            itemId = kefinStr(entry.item.LookupCI("Id"))
+            response = kefinRequest("POST", "/UserItems/" + itemId + "/Rating", { userId: m.userId, likes: false })
+            if response.ok
+                kefinLog("Watchlist: removed watched item " + kefinStr(entry.item.LookupCI("Name")))
+                continue for
+            end if
+        end if
+        kept.push(entry)
+    end for
+    return kept
+end function
+
+' Cards from a section's fixed "items" list (studio links, tag collections)
+function buildStaticCards(items as object, imageWidth as integer) as object
+    root = m.top.root
+    cards = []
+    for each entry in items
+        if LCase(type(entry)) <> "roassociativearray" then continue for
+
+        name = kefinStr(entry.LookupCI("Name"))
+        itemId = kefinStr(entry.LookupCI("Id"))
+        cardUrl = kefinStr(entry.LookupCI("cardUrl"))
+        route = invalid
+
+        if itemId <> ""
+            route = { kind: "jellyfinId", id: itemId, title: name }
+        else if Instr(1, cardUrl, "type=tag") > 0
+            tags = urlParam(cardUrl, "tag")
+            if tags <> ""
+                route = {
+                    kind: "grid",
+                    title: name,
+                    params: { Tags: tags, Recursive: true, IncludeItemTypes: "Movie,Series", SortBy: "SortName", SortOrder: "Ascending" }
+                }
+            end if
+        end if
+
+        if not isValid(route)
+            kefinLog("Card '" + name + "' links to " + cardUrl + " which has no Roku equivalent - skipped")
+            continue for
+        end if
+
+        artUrl = kefinStr(entry.LookupCI("imageUrl")).Replace("${kefinTweaksRoot}", root)
+        ' Roku can't draw SVG; fall back to the item's own Jellyfin image
+        if LCase(Right(artUrl, 4)) = ".svg" or Instr(1, artUrl, "${") > 0 then artUrl = ""
+        if artUrl = "" and itemId <> ""
+            artUrl = ImageURL(itemId, "Primary", { maxWidth: 464, maxHeight: 261 })
+        end if
+
+        cards.push(kefinFolderCard({ Id: itemId, Name: name, Type: "Folder" }, route, imageWidth, artUrl))
+    end for
+    return cards
+end function
+
+' Reads a query parameter out of a web hash URL such as #/list.html?type=tag&tag=a|b
+function urlParam(url as string, name as string) as string
+    queryStart = Instr(1, url, "?")
+    if queryStart = 0 then return ""
+    for each pair in Mid(url, queryStart + 1).Split("&")
+        parts = pair.Split("=")
+        if parts.Count() = 2 and LCase(parts[0]) = LCase(name)
+            return parts[1].DecodeUriComponent()
+        end if
+    end for
+    return ""
+end function
+
+' IMDb Top 250 movies in the library, matched on IMDb id like KefinTweaks moviesCache.getImdbTop250Movies
+function imdbTop250Items(options as object) as object
+    ids = imdbTop250LibraryIds()
+    if ids.Count() = 0 then return []
+
+    shuffleArray(ids)
+    limit = kefinInt(options.LookupCI("Limit"), 20)
+    if limit <= 0 then limit = 20
+    picked = []
+    for i = 0 to ids.Count() - 1
+        if i >= limit then exit for
+        picked.push(ids[i])
+    end for
+
+    params = {
+        userId: m.userId,
+        Ids: picked.join(","),
+        Fields: KEFIN_ITEM_FIELDS,
+        EnableImageTypes: "Primary,Backdrop,Thumb",
+        ImageTypeLimit: 1
+    }
+    return kefinResponseItems(kefinGetJson("/Items", params))
+end function
+
+' Ids of library movies on the IMDb Top 250, cached for a day in m.global.kefinCache
+function imdbTop250LibraryIds() as object
+    kefinEnsureGlobals()
+    cache = m.global.kefinCache
+    entry = cache.LookupCI("imdbTop250")
+    now = kefinNow()
+    if isValid(entry) and isStringEqual(entry.userId, m.userId) and now - entry.at < KEFIN_IMDB_CACHE_SECONDS
+        return entry.ids
+    end if
+
+    response = kefinRequestAbsolute(KEFIN_IMDB_TOP_250_URL, 15000)
+    list = invalid
+    if response.ok then list = ParseJson(response.text)
+    if LCase(type(list)) <> "roarray"
+        kefinLog("IMDb Top 250 list could not be downloaded")
+        return []
+    end if
+
+    pattern = CreateObject("roRegex", "tt[0-9]+", "")
+    top = {}
+    for each movie in list
+        match = pattern.Match(kefinStr(chainLookup(movie, "imdb_url")))
+        if match.Count() > 0 then top[LCase(match[0])] = true
+    end for
+
+    ids = []
+    startIndex = 0
+    for page = 1 to 20
+        params = {
+            userId: m.userId,
+            IncludeItemTypes: "Movie",
+            Recursive: true,
+            HasImdbId: true,
+            Fields: "ProviderIds",
+            EnableImages: false,
+            EnableUserData: false,
+            EnableTotalRecordCount: false,
+            StartIndex: startIndex,
+            Limit: 1000
+        }
+        items = kefinResponseItems(kefinGetJson("/Items", params, 30000))
+        for each movie in items
+            imdbId = LCase(kefinStr(chainLookup(movie, "ProviderIds.Imdb")))
+            if imdbId <> "" and top.DoesExist(imdbId) then ids.push(kefinStr(movie.LookupCI("Id")))
+        end for
+        if items.Count() < 1000 then exit for
+        startIndex = startIndex + 1000
+    end for
+
+    kefinLog("IMDb Top 250: " + ids.Count().toStr() + " movies in the library")
+    cache.imdbTop250 = { ids: ids, at: now, userId: m.userId }
+    m.global.kefinCache = cache
+    return ids
+end function
+
+' ------------------------------------------------------------------------------------------
+' Discovery sections: "{Genre} Movies", "Starring {Person}", "Because you watched {Title}"...
+' KefinTweaks scrolls these in endlessly on the web; the Roku shows a fixed number of rows.
+' ------------------------------------------------------------------------------------------
+
+sub buildDiscoveryRows(discovery as object)
+    m.discoverySources = {}
+    settings = kefinAA(discovery.LookupCI("settings"))
+    rowCount = kefinInt(discovery.LookupCI("rowCount"), 6)
+    baseOrder = kefinInt(discovery.LookupCI("baseOrder"), 100000)
+
+    pool = []
+    for each section in kefinArr(discovery.LookupCI("sections"))
+        pool.push(section)
+    end for
+    if pool.Count() = 0 then return
+
+    used = {}
+    built = 0
+    attempts = 0
+    while built < rowCount and attempts < rowCount * 3
+        attempts++
+        section = pool[Rnd(pool.Count()) - 1]
+
+        result = invalid
+        try
+            result = resolveDiscovery(section, settings, used)
+        catch e
+            kefinLog("Discovery section '" + kefinStr(section.LookupCI("name")) + "' failed: " + e.message)
+        end try
+
+        if isValid(result)
+            emitRow("kefin:discovery:" + built.toStr(), baseOrder + built, result)
+            built++
+        end if
+    end while
+
+    ' Clear rows left over from a previous, longer run
+    previous = kefinInt(discovery.LookupCI("previousCount"), 0)
+    for i = built to previous - 1
+        emitRow("kefin:discovery:" + i.toStr(), baseOrder + i, invalid)
+    end for
+end sub
+
+function resolveDiscovery(section as object, settings as object, used as object) as dynamic
+    discoveryType = kefinStr(section.LookupCI("discoveryType"))
+    mediaKind = kefinStr(section.LookupCI("discoveryItemType"), "Movie")
+    renderMode = kefinStr(section.LookupCI("renderMode"))
+    size = kefinCardSize(kefinStr(section.LookupCI("cardFormat"), kefinStr(settings.LookupCI("defaultCardFormat"), "Poster")), renderMode)
+    limit = kefinInt(section.LookupCI("itemLimit"), kefinInt(settings.LookupCI("defaultItemLimit"), 16))
+
+    queries = kefinArr(section.LookupCI("queries"))
+    baseOptions = {}
+    if queries.Count() > 0 then baseOptions = kefinAA(queries[0].LookupCI("queryOptions"))
+
+    result = invalid
+    if discoveryType = "Genre" or discoveryType = "Studio"
+        result = discoverByListing(section, discoveryType, mediaKind, baseOptions, settings, limit, used)
+    else if discoveryType = "Person"
+        result = discoverByPerson(section, mediaKind, baseOptions, limit, used)
+    else if discoveryType = "Similar" or discoveryType = "Watchlist"
+        result = discoverSimilar(section, mediaKind, limit, used)
+    else if discoveryType = "Collection"
+        result = discoverCollection(section, baseOptions, limit, used)
+    else
+        kefinLog("Unsupported discovery type '" + discoveryType + "' - skipped")
+        return invalid
+    end if
+
+    if not isValid(result) then return invalid
+
+    items = result.items
+    if kefinStr(section.LookupCI("sortBy"), "Random") = "Random" then shuffleArray(items)
+
+    cards = []
+    for each item in items
+        if cards.Count() >= limit then exit for
+        card = kefinItemCard(item, size[0])
+        if isValid(card) then cards.push(card)
+    end for
+    if cards.Count() < KEFIN_DISCOVERY_MIN_ITEMS then return invalid
+
+    return { title: result.title, size: size, items: cards }
+end function
+
+' Runs the section's source query (or the stand-in for a KefinTweaks cache data source).
+' Results are kept for the rest of this run, since several rows can draw from one section.
+function discoverySourceItems(section as object, mediaKind as string) as object
+    if not isValid(m.discoverySources) then m.discoverySources = {}
+    cacheKey = kefinStr(section.LookupCI("id"), kefinStr(section.LookupCI("name")))
+    cached = m.discoverySources.LookupCI(cacheKey)
+    if isValid(cached) then return cached
+
+    items = fetchDiscoverySourceItems(section, mediaKind)
+    m.discoverySources[cacheKey] = items
+    return items
+end function
+
+function fetchDiscoverySourceItems(section as object, mediaKind as string) as object
+    source = kefinAA(section.LookupCI("discoverySourceQuery"))
+    dataSource = kefinStr(source.LookupCI("dataSource"))
+
+    if dataSource <> ""
+        ' KefinTweaks builds these from a full library cache; a random sample stands in for it
+        params = {
+            userId: m.userId,
+            Recursive: true,
+            SortBy: "Random",
+            Limit: 40,
+            Fields: "People",
+            EnableImages: false
+        }
+        if dataSource = "SeriesCache.getCompletedSeries"
+            params.IncludeItemTypes = "Series"
+            params.Filters = "IsPlayed"
+            params.Limit = 25
+        else
+            params.IncludeItemTypes = kefinStr(chainLookup(source, "dataSourceOptions.ItemType"), mediaKind)
+        end if
+        return kefinResponseItems(kefinGetJson("/Items", params))
+    end if
+
+    path = kefinStr(source.LookupCI("path"), "/Items")
+    params = buildQueryParams(path, kefinAA(source.LookupCI("queryOptions")))
+    return kefinResponseItems(kefinGetJson(path, params))
+end function
+
+' "{Genre} Movies", "Shows from {Studio}"
+function discoverByListing(section as object, discoveryType as string, mediaKind as string, baseOptions as object, settings as object, limit as integer, used as object) as dynamic
+    candidates = discoverySourceItems(section, mediaKind)
+    shuffleArray(candidates)
+
+    minCount = kefinInt(settings.LookupCI("min" + discoveryType + mediaKind + "Count"), 1)
+    ' Rating-filtered "Top Rated" variants only need a full row
+    if isValid(baseOptions.LookupCI("MinCommunityRating")) then minCount = KEFIN_DISCOVERY_MIN_ITEMS
+
+    tried = 0
+    for each candidate in candidates
+        if tried >= KEFIN_DISCOVERY_CANDIDATES then exit for
+        name = kefinStr(candidate.LookupCI("Name"))
+        key = discoveryType + ":" + mediaKind + ":" + LCase(name)
+        if name = "" or used.DoesExist(key) then continue for
+        tried++
+
+        params = buildQueryParams("/Items", baseOptions)
+        if discoveryType = "Genre"
+            params.GenreIds = kefinStr(candidate.LookupCI("Id"))
+        else
+            params.StudioIds = kefinStr(candidate.LookupCI("Id"))
+        end if
+        params.Limit = limit * 2
+        params.EnableTotalRecordCount = true
+
+        response = kefinGetJson("/Items", params)
+        items = kefinResponseItems(response)
+        total = kefinInt(chainLookup(response, "TotalRecordCount"), items.Count())
+        if total >= minCount and items.Count() >= KEFIN_DISCOVERY_MIN_ITEMS
+            used[key] = true
+            title = kefinStr(section.LookupCI("name")).Replace("{" + discoveryType + "}", name)
+            return { title: title, items: items }
+        end if
+    end for
+    return invalid
+end function
+
+' "Starring {Person}", "Directed by {Person}"
+function discoverByPerson(section as object, mediaKind as string, baseOptions as object, limit as integer, used as object) as dynamic
+    personType = LCase(kefinStr(section.LookupCI("discoveryPersonType"), "Actor"))
+    sources = discoverySourceItems(section, mediaKind)
+
+    candidates = []
+    for each source in sources
+        for each person in kefinArr(source.LookupCI("People"))
+            if LCase(kefinStr(person.LookupCI("Type"))) = personType
+                candidates.push({ person: person, sourceId: kefinStr(source.LookupCI("Id")), sourceTitle: kefinStr(source.LookupCI("Name")) })
+            end if
+        end for
+    end for
+    shuffleArray(candidates)
+
+    minItems = KEFIN_DISCOVERY_MIN_ITEMS
+    tried = 0
+    for each candidate in candidates
+        if tried >= KEFIN_DISCOVERY_CANDIDATES then exit for
+        personId = kefinStr(candidate.person.LookupCI("Id"))
+        key = "person:" + personType + ":" + personId
+        if personId = "" or used.DoesExist(key) then continue for
+        tried++
+
+        params = buildQueryParams("/Items", baseOptions)
+        params.PersonIds = personId
+        params.Limit = limit * 2
+
+        items = []
+        for each item in kefinResponseItems(kefinGetJson("/Items", params))
+            if not isStringEqual(item.LookupCI("Id"), candidate.sourceId) then items.push(item)
+        end for
+
+        if items.Count() >= minItems
+            used[key] = true
+            title = kefinStr(section.LookupCI("name")).Replace("{Person}", kefinStr(candidate.person.LookupCI("Name")))
+            return { title: title, items: items }
+        end if
+    end for
+    return invalid
+end function
+
+' "Because you watched {Title}", "Because {Title} is on your Watchlist"
+function discoverSimilar(section as object, mediaKind as string, limit as integer, used as object) as dynamic
+    sources = discoverySourceItems(section, mediaKind)
+    shuffleArray(sources)
+
+    tried = 0
+    for each source in sources
+        if tried >= KEFIN_DISCOVERY_CANDIDATES then exit for
+
+        seedId = kefinStr(source.LookupCI("Id"))
+        seedTitle = kefinStr(source.LookupCI("Name"))
+        ' Episode sources stand for their series
+        if mediaKind = "Series" and isStringEqual(source.LookupCI("Type"), "Episode")
+            seedId = kefinStr(source.LookupCI("SeriesId"))
+            seedTitle = kefinStr(source.LookupCI("SeriesName"))
+        end if
+
+        key = "similar:" + seedId
+        if seedId = "" or used.DoesExist(key) then continue for
+        tried++
+
+        params = {
+            userId: m.userId,
+            Limit: limit * 2,
+            Fields: KEFIN_ITEM_FIELDS,
+            EnableImageTypes: "Primary,Backdrop,Thumb",
+            ImageTypeLimit: 1
+        }
+        items = []
+        for each item in kefinResponseItems(kefinGetJson("/Items/" + seedId + "/Similar", params))
+            if isStringEqual(item.LookupCI("Type"), mediaKind) then items.push(item)
+        end for
+
+        if items.Count() >= KEFIN_DISCOVERY_MIN_ITEMS
+            used[key] = true
+            return { title: kefinStr(section.LookupCI("name")).Replace("{Title}", seedTitle), items: items }
+        end if
+    end for
+    return invalid
+end function
+
+' "{Collection}": items of a random collection
+function discoverCollection(section as object, baseOptions as object, limit as integer, used as object) as dynamic
+    minimumItems = kefinInt(section.LookupCI("minimumItems"), 3)
+    params = {
+        userId: m.userId,
+        IncludeItemTypes: "BoxSet",
+        Recursive: true,
+        Fields: "ChildCount",
+        EnableImages: false,
+        Limit: 500
+    }
+    boxsets = kefinResponseItems(kefinGetJson("/Items", params))
+    shuffleArray(boxsets)
+
+    tried = 0
+    for each boxset in boxsets
+        if tried >= KEFIN_DISCOVERY_CANDIDATES then exit for
+        boxsetId = kefinStr(boxset.LookupCI("Id"))
+        key = "collection:" + boxsetId
+        if boxsetId = "" or used.DoesExist(key) then continue for
+        childCount = kefinInt(boxset.LookupCI("ChildCount"), minimumItems)
+        if childCount < minimumItems then continue for
+        tried++
+
+        itemParams = buildQueryParams("/Items", baseOptions)
+        itemParams.Delete("Recursive")
+        itemParams.ParentId = boxsetId
+        itemParams.Limit = limit
+
+        items = kefinResponseItems(kefinGetJson("/Items", itemParams))
+        if items.Count() >= minimumItems and items.Count() >= KEFIN_DISCOVERY_MIN_ITEMS
+            used[key] = true
+            return { title: kefinStr(section.LookupCI("name")).Replace("{Collection}", kefinStr(boxset.LookupCI("Name"))), items: items }
+        end if
+    end for
+    return invalid
+end function

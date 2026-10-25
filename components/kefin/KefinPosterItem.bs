@@ -1,0 +1,28 @@
+import "pkg:/source/utils/misc.bs"
+
+sub init()
+    m.poster = m.top.findNode("poster")
+    m.placeholder = m.top.findNode("placeholder")
+    m.title = m.top.findNode("title")
+    m.subtitle = m.top.findNode("subtitle")
+end sub
+
+sub itemContentChanged()
+    item = m.top.itemContent
+    if not isValid(item) then return
+
+    title = item.LookupCI("title")
+    if not isValidAndNotEmpty(title) then title = item.LookupCI("name")
+    if not isValidAndNotEmpty(title) then title = ""
+    m.title.text = title
+    m.placeholder.text = title
+
+    subtitle = item.LookupCI("SubTitle")
+    if not isValidAndNotEmpty(subtitle) then subtitle = ""
+    m.subtitle.text = subtitle
+
+    uri = item.LookupCI("posterURL")
+    if not isValidAndNotEmpty(uri) then uri = item.LookupCI("thumbnailURL")
+    if not isValidAndNotEmpty(uri) then uri = ""
+    m.poster.uri = uri
+end sub

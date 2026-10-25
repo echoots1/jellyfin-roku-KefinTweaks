@@ -1,0 +1,60 @@
+' @fileoverview KefinTweaks support: home section helpers shared by HomeRows and KefinSectionsTask
+
+import "pkg:/source/constants/HomeRowItemSizes.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Default cache time for a section with no ttl (KefinTweaks CACHE.DEFAULT_TTL is one hour)
+const KEFIN_DEFAULT_SECTION_TTL_MS = 3600000
+
+' Row id used on HomeRow nodes for a KefinTweaks section
+function kefinSectionRowId(section as object) as string
+    id = kefinStr(section.LookupCI("id"))
+    if id = "" then id = kefinStr(section.LookupCI("name"))
+    return "kefin:" + id
+end function
+
+' Seasonal sections carry startDate/endDate as "MM-DD". Returns true when today is inside the window.
+function kefinSectionActiveToday(section as object) as boolean
+    startDate = kefinStr(section.LookupCI("startDate"))
+    endDate = kefinStr(section.LookupCI("endDate"))
+    if startDate = "" or endDate = "" then return true
+
+    startKey = kefinMonthDayKey(startDate)
+    endKey = kefinMonthDayKey(endDate)
+    if startKey < 0 or endKey < 0 then return true
+
+    now = CreateObject("roDateTime")
+    now.ToLocalTime()
+    today = now.GetMonth() * 100 + now.GetDayOfMonth()
+
+    ' A window like 12-20 to 01-05 wraps over the new year
+    if startKey <= endKey then return today >= startKey and today <= endKey
+    return today >= startKey or today <= endKey
+end function
+
+function kefinMonthDayKey(value as string) as integer
+    parts = value.Split("-")
+    if parts.Count() <> 2 then return -1
+    month = parts[0].ToInt()
+    day = parts[1].ToInt()
+    if month < 1 or month > 12 or day < 1 or day > 31 then return -1
+    return month * 100 + day
+end function
+
+' Section cache time in seconds; 0 means rebuild on every visit to Home
+function kefinSectionTtlSeconds(section as object) as integer
+    ttlMs = kefinInt(section.LookupCI("ttl"), KEFIN_DEFAULT_SECTION_TTL_MS)
+    if ttlMs <= 0 then return 0
+    return Int(ttlMs / 1000)
+end function
+
+' Maps a KefinTweaks cardFormat to the home row item size
+function kefinCardSize(cardFormat as string, renderMode = "" as string) as object
+    if isStringEqual(renderMode, "Spotlight") then return homeRowItemSizes.WIDE_POSTER
+
+    format = LCase(cardFormat)
+    if format = "poster" or format = "series poster" then return homeRowItemSizes.MOVIE_POSTER
+    if format = "square" or format = "sqaure" then return homeRowItemSizes.MUSIC_ALBUM
+    return homeRowItemSizes.WIDE_POSTER
+end function

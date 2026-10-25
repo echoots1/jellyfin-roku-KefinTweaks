@@ -1,0 +1,113 @@
+import "pkg:/source/kefin/KefinConfigParse.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/kefin/KefinHttp.bs"
+import "pkg:/source/utils/misc.bs"
+
+' Re-read the config at most this often, so admin changes show up on the next visit to Home
+const KEFIN_CONFIG_TTL_SECONDS = 30
+
+sub init()
+    m.top.functionName = "loadConfig"
+end sub
+
+sub loadConfig()
+    try
+        refreshConfig()
+    catch e
+        kefinLog("Config load failed: " + e.message)
+    end try
+    m.top.done = true
+end sub
+
+sub refreshConfig()
+    kefinEnsureGlobals()
+
+    userId = chainLookupReturn(m.global.session, "user.id", "")
+    if not isValidAndNotEmpty(userId) then return
+
+    now = kefinNow()
+    current = m.global.kefin
+    sameUser = isStringEqual(current.LookupCI("userId"), userId)
+    if not m.top.force and sameUser and isValid(current.LookupCI("loadedAt"))
+        if now - current.loadedAt < KEFIN_CONFIG_TTL_SECONDS then return
+    end if
+
+    fetched = fetchConfig()
+
+    if fetched.status = "unreachable"
+        ' Keep the last good config for this user; otherwise behave like the stock app
+        if sameUser and kefinBool(current.LookupCI("ok"), false)
+            kefinLog("Server unreachable, keeping the last KefinTweaks config")
+            current.loadedAt = now
+            m.global.kefin = current
+        else
+            m.global.kefin = { ok: false, userId: userId, loadedAt: now, reason: "unreachable" }
+        end if
+        return
+    end if
+
+    if fetched.status <> "ok"
+        if kefinBool(current.LookupCI("ok"), false) or not isStringEqual(current.LookupCI("reason"), fetched.status)
+            kefinLog("No usable KefinTweaks config (" + fetched.status + "), using stock app behavior")
+        end if
+        m.global.kefin = { ok: false, userId: userId, loadedAt: now, reason: fetched.status }
+        return
+    end if
+
+    stamp = kefinConfigStamp(fetched.text)
+    state = kefinReduceConfig(fetched.json)
+    state.userId = userId
+    state.stamp = stamp
+    state.loadedAt = now
+    state.seerr = fetchSeerrStatus()
+
+    if not isStringEqual(current.LookupCI("stamp"), stamp) or not sameUser
+        kefinLogSettings(fetched.json, state)
+        kefinLog("Seerr via Jellyfin Enhanced: enhanced=" + boolText(state.seerr.enhanced) + " active=" + boolText(state.seerr.active) + " linked=" + boolText(state.seerr.linked))
+    end if
+
+    m.global.kefin = state
+end sub
+
+' Reads the config from JavaScript Injector. public.js needs no login; private.js is tried in
+' case the admin marked the config script as requiring authentication.
+' Returns { status: "ok" | "missing" | "malformed" | "unreachable", json, text }
+function fetchConfig() as object
+    sawResponse = false
+    sawMarker = false
+
+    for each path in ["/JavaScriptInjector/public.js", "/JavaScriptInjector/private.js"]
+        response = kefinRequest("GET", path, invalid, invalid, 10000)
+        if response.code > 0 then sawResponse = true
+        if not response.ok then continue for
+
+        if Instr(1, response.text, "window.KefinTweaksConfig") > 0 then sawMarker = true
+
+        extracted = kefinExtractConfig(response.text)
+        if isValid(extracted)
+            return { status: "ok", json: extracted.json, text: extracted.text }
+        end if
+    end for
+
+    if not sawResponse then return { status: "unreachable" }
+    if sawMarker then return { status: "malformed" }
+    return { status: "missing" }
+end function
+
+' Asks Jellyfin Enhanced whether Seerr is reachable and this user is linked to a Seerr account
+function fetchSeerrStatus() as object
+    result = { enhanced: false, active: false, linked: false }
+
+    status = kefinGetJson("/JellyfinEnhanced/jellyseerr/user-status", invalid, 8000)
+    if LCase(type(status)) <> "roassociativearray" then return result
+
+    result.enhanced = true
+    result.active = kefinBool(status.LookupCI("active"), false)
+    result.linked = kefinBool(status.LookupCI("userFound"), false)
+    return result
+end function
+
+function boolText(value as boolean) as string
+    if value then return "true"
+    return "false"
+end function

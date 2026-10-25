@@ -1,3 +1,4 @@
+import "pkg:/components/kefin/KefinDetails.bs"
 import "pkg:/source/constants/HomeRowItemSizes.bs"
 import "pkg:/source/enums/AnimationControl.bs"
 import "pkg:/source/enums/ColorPalette.bs"
@@ -60,6 +61,7 @@ sub init()
     m.top.selectedButtonIndex = 0
 
     setFontSizes()
+    kefinSeriesWatchlistInit()
 end sub
 
 sub onDisplayResumeButtonChange()
@@ -237,6 +239,7 @@ sub itemContentChanged()
     end if
 
     setFieldText("overview", itemData.overview)
+    kefinSeriesWatchlistUpdate(itemData)
 
     if isStringEqual(m.loadStatus, ViewLoadStatus.INIT)
         m.loadStatus = ViewLoadStatus.FIRSTLOAD
@@ -418,6 +421,8 @@ sub exitEpisodeListFullScreen()
 end sub
 
 function onKeyEvent(key as string, press as boolean) as boolean
+    if kefinSeriesWatchlistOnKey(key, press) then return true
+
     seasonRow = m.top.findNode("seasons")
     extrasSection = m.top.findNode("extrasGrid")
 

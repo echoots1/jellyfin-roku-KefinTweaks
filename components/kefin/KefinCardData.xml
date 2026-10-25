@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A HomeData item with the extra fields KefinTweaks rows, grids and Seerr cards use.
+     kefinRoute, when set, tells the KefinTweaks router (source/kefin/KefinRouter.bs) what to open. -->
+<component name="KefinCardData" extends="HomeData">
+  <interface>
+    <field id="title" type="string" />
+    <field id="SubTitle" type="string" />
+    <field id="imageDimensions" type="array" />
+    <field id="kefinRoute" type="assocarray" />
+  </interface>
+</component>

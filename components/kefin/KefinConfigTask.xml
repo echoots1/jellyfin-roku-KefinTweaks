@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loads the KefinTweaks config from the server into m.global.kefin (see KefinConfigTask.bs) -->
+<component name="KefinConfigTask" extends="Task">
+  <interface>
+    <field id="force" type="boolean" value="false" />
+    <field id="done" type="boolean" alwaysNotify="true" />
+  </interface>
+</component>

@@ -1,0 +1,157 @@
+import "pkg:/source/enums/ColorPalette.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/utils/misc.bs"
+
+sub init()
+    m.top.optionsAvailable = false
+    m.backdrop = m.top.findNode("backdrop")
+    m.poster = m.top.findNode("poster")
+    m.titleLabel = m.top.findNode("title")
+    m.facts = m.top.findNode("facts")
+    m.status = m.top.findNode("status")
+    m.overview = m.top.findNode("overview")
+    m.message = m.top.findNode("message")
+    m.actions = m.top.findNode("actions")
+    m.actions.focusBitmapBlendColor = chainLookupReturn(m.global.session, "user.settings.colorCursor", ColorPalette.HIGHLIGHT)
+    m.actions.observeField("itemSelected", "onActionSelected")
+
+    m.detailsTask = CreateObject("roSGNode", "KefinDataTask")
+    m.detailsTask.observeField("done", "onDetailsLoaded")
+    m.requestTask = CreateObject("roSGNode", "KefinDataTask")
+    m.requestTask.observeField("done", "onRequestDone")
+    m.details = invalid
+end sub
+
+sub onRouteChanged()
+    route = m.top.route
+    m.titleLabel.text = kefinStr(route.LookupCI("title"))
+    m.top.overhangTitle = kefinStr(route.LookupCI("title"))
+    loadDetails()
+end sub
+
+sub loadDetails()
+    route = m.top.route
+    startLoadingSpinner(false)
+    m.detailsTask.request = {
+        mode: "seerrDetails",
+        mediaType: kefinStr(route.LookupCI("mediaType")),
+        tmdbId: kefinStr(route.LookupCI("tmdbId"))
+    }
+    m.detailsTask.control = "RUN"
+end sub
+
+sub onDetailsLoaded()
+    stopLoadingSpinner()
+    details = m.detailsTask.result
+    if not kefinBool(chainLookup(details, "ok"), false)
+        m.message.text = kefinStr(chainLookup(details, "message"), tr("Could not load details from Seerr"))
+        setActions([{ id: "back", title: tr("Back") }])
+        return
+    end if
+
+    m.details = details
+    m.titleLabel.text = details.title
+    m.top.overhangTitle = details.title
+    m.poster.uri = details.posterUrl
+    m.backdrop.uri = details.backdropUrl
+    m.overview.text = details.overview
+
+    facts = []
+    if details.year <> "" then facts.push(details.year)
+    if details.mediaType = "tv"
+        facts.push(tr("TV Show"))
+    else
+        facts.push(tr("Movie"))
+    end if
+    if details.genres <> "" then facts.push(details.genres)
+    m.facts.text = facts.join("  -  ")
+    m.status.text = details.statusText
+
+    actions = []
+    if details.jellyfinId <> "" then actions.push({ id: "open", title: tr("Open in Library") })
+
+    if details.mediaType = "movie"
+        if details.status = 1 or details.status = 6 then actions.push({ id: "request", title: tr("Request") })
+    else
+        open = []
+        for each season in details.seasons
+            if season.status = 1 or season.status = 6 then open.push(season)
+        end for
+        if open.Count() > 1
+            actions.push({ id: "request-all", title: tr("Request all") + " " + open.Count().toStr() + " " + tr("seasons") })
+        end if
+        for each season in open
+            actions.push({ id: "season-" + season.number.toStr(), title: tr("Request") + " " + season.name })
+        end for
+    end if
+
+    if actions.Count() = 0 then actions.push({ id: "back", title: tr("Back") })
+    setActions(actions)
+end sub
+
+sub setActions(actions as object)
+    content = CreateObject("roSGNode", "ContentNode")
+    for each action in actions
+        child = content.CreateChild("ContentNode")
+        child.id = action.id
+        child.title = action.title
+    end for
+    m.actions.content = content
+    m.actions.setFocus(true)
+    m.top.lastFocus = m.actions
+end sub
+
+sub onActionSelected()
+    action = m.actions.content.getChild(m.actions.itemSelected)
+    if not isValid(action) then return
+    actionId = action.id
+
+    if actionId = "back"
+        m.global.sceneManager.callFunc("popScene")
+        return
+    end if
+
+    if not isValid(m.details) then return
+
+    if actionId = "open"
+        card = CreateObject("roSGNode", "KefinCardData")
+        card.kefinRoute = { kind: "jellyfinId", id: m.details.jellyfinId, title: m.details.title }
+        m.top.selectedItem = card
+        return
+    end if
+
+    body = { mediaType: m.details.mediaType, mediaId: m.details.tmdbId.ToInt() }
+    if m.details.mediaType = "tv"
+        seasons = []
+        if actionId = "request-all"
+            for each season in m.details.seasons
+                if season.status = 1 or season.status = 6 then seasons.push(season.number)
+            end for
+        else if Left(actionId, 7) = "season-"
+            seasons.push(Mid(actionId, 8).ToInt())
+        end if
+        if seasons.Count() = 0 then return
+        body.seasons = seasons
+    end if
+
+    m.message.text = tr("Sending request...")
+    startLoadingSpinner(false)
+    m.requestTask.request = { mode: "seerrRequest", body: body }
+    m.requestTask.control = "RUN"
+end sub
+
+sub onRequestDone()
+    stopLoadingSpinner()
+    result = m.requestTask.result
+    m.message.text = kefinStr(chainLookup(result, "message"))
+    if kefinBool(chainLookup(result, "ok"), false) then loadDetails()
+end sub
+
+sub OnScreenShown()
+    if isValid(m.actions.content)
+        m.actions.setFocus(true)
+        m.top.lastFocus = m.actions
+    else
+        m.top.setFocus(true)
+    end if
+end sub

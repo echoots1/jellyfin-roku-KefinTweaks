@@ -1,0 +1,77 @@
+' @fileoverview KefinTweaks search: adds a "Request with Seerr" row to the search results.
+' Imported into components/search/SearchResults.bs. Needs the KefinTweaks search script,
+' search.enableJellyseerr, and a Seerr account linked through Jellyfin Enhanced.
+
+import "pkg:/source/kefin/KefinCore.bs"
+
+sub kefinSearchInit()
+    m.kefinSeerrTask = CreateObject("roSGNode", "KefinDataTask")
+    m.kefinSeerrTask.observeField("done", "kefinOnSeerrResults")
+    m.kefinSeerrQuery = ""
+    m.kefinSeerrRunning = ""
+end sub
+
+' Called after the library results for query are shown
+sub kefinSearchStart(query as dynamic)
+    if not isValid(m.kefinSeerrTask) then return
+    m.kefinSeerrQuery = kefinStr(query)
+    if Len(m.kefinSeerrQuery.Trim()) < 2 then return
+    if not kefinSeerrSearchOn() then return
+
+    ' A search still running will pick up the newest query when it finishes
+    if isStringEqual(m.kefinSeerrTask.state, "run") then return
+    kefinRunSeerrSearch(m.kefinSeerrQuery)
+end sub
+
+sub kefinRunSeerrSearch(query as string)
+    m.kefinSeerrRunning = query
+    m.kefinSeerrTask.request = { mode: "seerrSearch", query: query }
+    m.kefinSeerrTask.control = "RUN"
+end sub
+
+sub kefinOnSeerrResults()
+    if not isStringEqual(m.kefinSeerrRunning, m.kefinSeerrQuery)
+        if Len(m.kefinSeerrQuery.Trim()) >= 2 then kefinRunSeerrSearch(m.kefinSeerrQuery)
+        return
+    end if
+
+    results = m.kefinSeerrTask.content
+    count = 0
+    if isValid(results) then count = results.getChildCount()
+    kefinLog("Seerr search '" + m.kefinSeerrQuery + "': " + count.toStr() + " results to request")
+    if count = 0 then return
+
+    row = CreateObject("roSGNode", "ContentNode")
+    row.title = tr("Request with Seerr")
+    for each card in results.getChildren(-1, 0)
+        ' GridItemMedium shows json.SeriesName as the title and the title field underneath
+        json = card.json
+        json.SeriesName = card.title
+        card.json = json
+        card.title = card.SubTitle
+        row.appendChild(card)
+    end for
+
+    ' Rebuild the content so the RowList lays out the new row even when it started empty
+    content = CreateObject("roSGNode", "ContentNode")
+    if isValid(m.searchRow.content)
+        for each existingRow in m.searchRow.content.getChildren(-1, 0)
+            content.appendChild(existingRow)
+        end for
+    end if
+    content.appendChild(row)
+
+    sizes = []
+    for each size in kefinArr(m.searchRow.rowItemSize)
+        sizes.push(size)
+    end for
+    heights = []
+    for each height in kefinArr(m.searchRow.rowHeights)
+        heights.push(height)
+    end for
+    sizes.push([230, 405])
+    heights.push(435)
+    m.searchRow.rowItemSize = sizes
+    m.searchRow.rowHeights = heights
+    m.searchRow.content = content
+end sub

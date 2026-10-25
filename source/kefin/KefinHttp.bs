@@ -1,0 +1,159 @@
+' @fileoverview KefinTweaks support: HTTP helpers with timeouts.
+'
+' These block until the request finishes or times out, so call them only from a Task
+' or the main BrightScript thread, never from a component's render thread.
+
+import "pkg:/source/api/baserequest.bs"
+import "pkg:/source/kefin/KefinCore.bs"
+import "pkg:/source/utils/misc.bs"
+
+const KEFIN_DEFAULT_TIMEOUT_MS = 15000
+
+' Builds a query string. Arrays are joined with commas, which is what the Jellyfin API expects.
+function kefinQueryString(params as dynamic) as string
+    if LCase(type(params)) <> "roassociativearray" then return ""
+
+    parts = []
+    for each key in params
+        value = kefinParamValue(params[key])
+        if isValid(value)
+            parts.push(key.EncodeUriComponent() + "=" + value.EncodeUriComponent())
+        end if
+    end for
+    return parts.join("&")
+end function
+
+function kefinParamValue(value as dynamic) as dynamic
+    valueType = LCase(type(value))
+    if valueType = "string" or valueType = "rostring" then return value
+    if valueType = "boolean" or valueType = "roboolean"
+        if value then return "true"
+        return "false"
+    end if
+    if kefinIsNumberType(valueType) then return kefinNumberToString(value)
+    if valueType = "roarray"
+        values = []
+        for each entry in value
+            entryValue = kefinParamValue(entry)
+            if isValid(entryValue) then values.push(entryValue)
+        end for
+        return values.join(",")
+    end if
+    return invalid
+end function
+
+' Makes a request to the Jellyfin server. Never hangs: gives up after timeoutMs.
+'
+' @param {string} method - GET or POST
+' @param {string} path - server path, e.g. /Items
+' @param {dynamic} params - query parameters (assocarray) or invalid
+' @param {dynamic} body - POST body: a string, an assocarray/array (sent as JSON), or invalid
+' @return {object} { ok, code, text } where code is -1 on timeout and 0 when the request could not start
+function kefinRequest(method as string, path as string, params = invalid as dynamic, body = invalid as dynamic, timeoutMs = KEFIN_DEFAULT_TIMEOUT_MS as integer) as object
+    url = buildURL(path)
+    if not isValid(url) then return { ok: false, code: 0, text: "" }
+
+    query = kefinQueryString(params)
+    if query <> ""
+        if Instr(1, url, "?") > 0
+            url = url + "&" + query
+        else
+            url = url + "?" + query
+        end if
+    end if
+
+    req = CreateObject("roUrlTransfer")
+    req.SetUrl(url)
+    req.RetainBodyOnError(true)
+    authRequest(req)
+    if LCase(Left(url, 8)) = "https://"
+        setCertificateAuthority(req)
+    end if
+
+    return kefinSend(req, method, body, timeoutMs, path)
+end function
+
+' Fetches an absolute URL (no Jellyfin auth header). Used for public lists such as the IMDb Top 250.
+function kefinRequestAbsolute(url as string, timeoutMs = KEFIN_DEFAULT_TIMEOUT_MS as integer) as object
+    req = CreateObject("roUrlTransfer")
+    req.SetUrl(url)
+    req.RetainBodyOnError(true)
+    if LCase(Left(url, 8)) = "https://"
+        setCertificateAuthority(req)
+    end if
+    return kefinSend(req, "GET", invalid, timeoutMs, url)
+end function
+
+function kefinSend(req as object, method as string, body as dynamic, timeoutMs as integer, label as string) as object
+    result = { ok: false, code: 0, text: "" }
+
+    port = CreateObject("roMessagePort")
+    req.SetMessagePort(port)
+
+    started = false
+    if UCase(method) = "GET"
+        started = req.AsyncGetToString()
+    else
+        req.AddHeader("Content-Type", "application/json")
+        req.SetRequest(UCase(method))
+        bodyText = ""
+        bodyType = LCase(type(body))
+        if bodyType = "string" or bodyType = "rostring"
+            bodyText = body
+        else if bodyType = "roassociativearray" or bodyType = "roarray"
+            bodyText = FormatJson(body)
+        end if
+        started = req.AsyncPostFromString(bodyText)
+    end if
+
+    if not started
+        kefinLog("Request could not start: " + method + " " + label)
+        return result
+    end if
+
+    msg = wait(timeoutMs, port)
+    if type(msg) <> "roUrlEvent"
+        req.AsyncCancel()
+        kefinLog("Request timed out after " + timeoutMs.toStr() + " ms: " + method + " " + label)
+        result.code = -1
+        return result
+    end if
+
+    result.code = msg.GetResponseCode()
+    text = msg.GetString()
+    if isValid(text) then result.text = text
+    result.ok = result.code >= 200 and result.code < 300
+    return result
+end function
+
+' GETs a server path and parses the JSON body. Returns invalid on any failure.
+function kefinGetJson(path as string, params = invalid as dynamic, timeoutMs = KEFIN_DEFAULT_TIMEOUT_MS as integer) as dynamic
+    response = kefinRequest("GET", path, params, invalid, timeoutMs)
+    if not response.ok
+        if response.code > 0 then kefinLog("GET " + path + " returned " + response.code.toStr())
+        return invalid
+    end if
+    return kefinParseJson(response.text)
+end function
+
+' POSTs JSON to a server path. Returns { ok, code, json }.
+function kefinPostJson(path as string, params = invalid as dynamic, body = invalid as dynamic, timeoutMs = KEFIN_DEFAULT_TIMEOUT_MS as integer) as object
+    response = kefinRequest("POST", path, params, body, timeoutMs)
+    return { ok: response.ok, code: response.code, json: kefinParseJson(response.text) }
+end function
+
+function kefinParseJson(text as dynamic) as dynamic
+    if not isValidAndNotEmpty(text) then return invalid
+    return ParseJson(text)
+end function
+
+' Returns the items of a Jellyfin list response, which is either { Items: [...] } or a bare array
+function kefinResponseItems(response as dynamic) as object
+    responseType = LCase(type(response))
+    if responseType = "roarray" then return response
+    if responseType = "roassociativearray"
+        items = response.LookupCI("Items")
+        if LCase(type(items)) = "roarray" then return items
+    end if
+    return []
+end function

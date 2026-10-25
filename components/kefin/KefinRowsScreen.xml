@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Rows of poster tiles for KefinTweaks screens such as Seerr Discover -->
+<component name="KefinRowsScreen" extends="JFScreen">
+  <children>
+    <RowList
+      id="rows"
+      translation="[96, 165]"
+      itemComponentName="KefinPosterItem"
+      itemSize="[1728, 480]"
+      rowItemSize="[[230, 420]]"
+      rowItemSpacing="[[40, 0]]"
+      itemSpacing="[0, 20]"
+      numRows="2"
+      showRowLabel="[true]"
+      rowLabelOffset="[[0, 12]]"
+      vertFocusAnimationStyle="fixedFocusWrap"
+      rowFocusAnimationStyle="floatingFocus" />
+    <Label id="message" translation="[96, 480]" width="1728" horizAlign="center" font="font:MediumSystemFont" visible="false" />
+  </children>
+  <interface>
+    <field id="screenTitle" type="string" />
+    <field id="request" type="assocarray" onChange="onRequestChanged" />
+    <field id="selectedItem" type="node" alwaysNotify="true" />
+  </interface>
+</component>

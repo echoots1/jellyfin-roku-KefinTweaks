@@ -1,3 +1,4 @@
+import "pkg:/components/kefin/KefinDetails.bs"
 import "pkg:/source/api/Image.bs"
 import "pkg:/source/utils/config.bs"
 import "pkg:/source/utils/misc.bs"
@@ -381,6 +382,7 @@ sub itemContentChanged()
 
     setWatchedColor()
     setFavoriteColor()
+    if kefinUpdateMovieWatchlistButton(m.buttonGrp, itemData) then calculateButtonThumbProperties()
 
     if not isStringEqual(itemData.Type, VideoType.EPISODE)
         removeTelevisionGoToButtons()
@@ -409,7 +411,7 @@ sub itemContentChanged()
             end if
         end for
 
-        m.top.selectedVideoStreamId = itemData.MediaSources[0].id
+        m.top.selectedVideoStreamId = kefinPreferredMediaSourceId(itemData.MediaSources)
     end if
 
     ' Find first Audio Stream and set that as default
