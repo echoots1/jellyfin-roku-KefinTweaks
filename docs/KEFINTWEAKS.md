@@ -32,6 +32,21 @@ With no KefinTweaks config on the server, the app behaves exactly like the offic
 
 The sideloaded app is separate from the Jellyfin app installed from the Roku store.
 
+## Install as a private beta channel (optional)
+
+A sideloaded developer app can only be deleted from Home: it can't be moved. A beta channel installs like a
+store app instead.
+
+1. **Once:** give the Roku a signing key. Run `nc <roku-ip> 8080` (or `telnet`), type `genkey`, and put the
+   password and DevID it prints into `.env` as `ROKU_SIGNING_PASSWORD` and `ROKU_DEV_ID`. Keep them safe: every
+   future update must be signed with the same key.
+2. **Each update:** `node scripts/kefin-package.mjs`. It builds the app, sideloads it, has the Roku sign it, and
+   saves `out/kefintweaks-roku-<version>.pkg`. Each package gets a new build number.
+3. At developer.roku.com, open **Beta Channel**. The first time, create a beta channel. Upload the `.pkg`, then
+   install the channel on the TV with the access code the dashboard shows.
+
+Roku only signs packages on the device that holds the key, so this must run on your home network.
+
 ## What it does
 
 | KefinTweaks setting | On Roku |

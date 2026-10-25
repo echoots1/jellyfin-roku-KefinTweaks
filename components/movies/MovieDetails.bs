@@ -401,6 +401,7 @@ sub itemContentChanged()
 
     ' Set default video source if user hasn't selected one yet
     if m.top.selectedVideoStreamId = "" and isValid(itemData.MediaSources)
+        preferredSourceId = kefinApplyPreferredMediaSource(itemData)
         for i = 0 to itemData.mediaStreams.Count() - 1
             if itemData.mediaStreams[i].Type = "Video"
                 m.options.codec = itemData.MediaStreams[i].Codec
@@ -411,7 +412,7 @@ sub itemContentChanged()
             end if
         end for
 
-        m.top.selectedVideoStreamId = kefinPreferredMediaSourceId(itemData.MediaSources)
+        m.top.selectedVideoStreamId = preferredSourceId
     end if
 
     ' Find first Audio Stream and set that as default

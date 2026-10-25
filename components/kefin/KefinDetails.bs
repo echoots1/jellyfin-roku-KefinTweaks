@@ -57,6 +57,30 @@ function kefinUpdateMovieWatchlistButton(buttonList as object, itemData as objec
     return changed
 end function
 
+' versionPreferences: selects the preferred media source and, when it isn't the first one, swaps in its
+' own tracks (as applyVideoSelection does for a manual pick) so audio and subtitle defaults match it.
+' Returns the id to use as selectedVideoStreamId.
+function kefinApplyPreferredMediaSource(itemData as object) as dynamic
+    sources = kefinArr(itemData.LookupCI("MediaSources"))
+    preferredId = kefinPreferredMediaSourceId(sources)
+    if sources.Count() < 2 or isStringEqual(preferredId, sources[0].LookupCI("Id")) then return preferredId
+
+    for each source in sources
+        if isStringEqual(source.LookupCI("Id"), preferredId)
+            streams = kefinArr(source.LookupCI("MediaStreams"))
+            if streams.Count() > 0
+                itemData.mediaStreams = streams
+                ' Keep the stored item in step: the screen re-reads it when shown again
+                m.top.unobserveField("itemContent")
+                m.top.itemContent.json = itemData
+                m.top.observeField("itemContent", "itemContentChanged")
+            end if
+            exit for
+        end if
+    end for
+    return preferredId
+end function
+
 ' versionPreferences: the media source KefinTweaks would list first. Ranked by the first matching
 ' edition term, then the first matching version term, then server order (versionPreferences.js rankOptions).
 function kefinPreferredMediaSourceId(mediaSources as dynamic) as dynamic
